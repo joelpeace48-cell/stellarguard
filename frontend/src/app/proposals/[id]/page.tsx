@@ -5,7 +5,8 @@ import Link from "next/link";
 import { toast } from "react-hot-toast";
 import { VoteButton } from "@/components/VoteButton";
 import { StatusBadge } from "@/components/StatusBadge";
-import { useGovernance } from "@/hooks/useGovernance";
+import { useFreighter } from "@/hooks/useFreighter";
+import { formatAddress } from "@/lib/formatters";
 import type { GovernanceProposal } from "@/lib/contractData";
 
 export default function ProposalDetailPage({
@@ -14,10 +15,12 @@ export default function ProposalDetailPage({
   params: { id: string };
 }) {
   const id = Number.parseInt(params.id, 10);
-  const { getProposal, finalize, getConfig, isLoading } = useGovernance();
+  const { address: currentAddress } = useFreighter();
+  const { getProposal, finalize, getConfig, executeProposal, isLoading } = useGovernance();
   const [proposal, setProposal] = useState<GovernanceProposal | null>(null);
   const [countdown, setCountdown] = useState("Unknown");
   const [isFinalizing, setIsFinalizing] = useState(false);
+  const [isExecuting, setIsExecuting] = useState(false);
   const [nowMs, setNowMs] = useState(Date.now());
 
   const loadProposal = useCallback(async () => {
@@ -85,6 +88,21 @@ export default function ProposalDetailPage({
     }
   };
 
+  const handleExecute = async () => {
+    if (!proposal || proposal.status !== "Passed" || isExecuting) return;
+    setIsExecuting(true);
+    const toastId = toast.loading("Executing proposal...");
+    try {
+      await executeProposal(id);
+      await loadProposal();
+      toast.success("Proposal executed", { id: toastId });
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to execute proposal", { id: toastId });
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
   return (
     <div className="space-y-8 pb-32 md:pb-0">
       {/* Back Link */}
@@ -107,13 +125,37 @@ export default function ProposalDetailPage({
             </div>
             <p className="text-gray-400 mt-2">{proposal?.description ?? "Loading proposal details..."}</p>
             {proposal ? (
-              <p className="text-xs text-gray-500 mt-2">
-                Ends at{" "}
-                {new Date(proposal.endsAt * 1000).toLocaleString(undefined, {
-                  timeZoneName: "short",
-                })}{" "}
-                ({countdown})
-              </p>
+              <div className="space-y-1 mt-3">
+                <p className="text-xs text-gray-500">
+                  Proposed by{" "}
+                  <span className="font-mono text-gray-400">
+                    {formatAddress(proposal.proposer, { startChars: 8, endChars: 6 })}
+                  </span>
+                </p>
+                <div className="flex flex-wrap gap-x-4 gap-y-1">
+                  <p className="text-xs text-gray-500">
+                    Created:{" "}
+                    <span className="text-gray-400">
+                      {new Date(proposal.createdAt * 1000).toLocaleString(undefined, {
+                        dateStyle: "medium",
+                        timeStyle: "short",
+                      })}
+                    </span>
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Ends:{" "}
+                    <span className="text-gray-400">
+                      {new Date(proposal.endsAt * 1000).toLocaleString(undefined, {
+                        dateStyle: "medium",
+                        timeStyle: "short",
+                      })}
+                    </span>
+                  </p>
+                </div>
+                <p className="text-xs text-primary-400 font-medium">
+                  Result: {countdown}
+                </p>
+              </div>
             ) : null}
           </div>
           <button className="btn-secondary" onClick={handleCopyLink} type="button">
@@ -149,34 +191,62 @@ export default function ProposalDetailPage({
         </div>
       </div>
 
-      <div className="card flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div className="card grid grid-cols-1 md:grid-cols-2 gap-6">
         <div>
           <h2 className="text-lg font-semibold text-white">Finalize Proposal</h2>
           <p className="text-sm text-gray-400">
             Finalization unlocks execution when proposal voting has ended.
           </p>
-          {!canFinalize && proposal ? (
+          {!canFinalize && proposal?.status === "Active" ? (
             <p className="text-xs text-yellow-400 mt-1">
               Available after deadline while status is Active.
             </p>
           ) : null}
+          <button
+            type="button"
+            className={`btn-primary w-full mt-4 ${!canFinalize || isFinalizing || isLoading ? "opacity-50 cursor-not-allowed" : ""}`}
+            disabled={!canFinalize || isFinalizing || isLoading}
+            onClick={handleFinalize}
+          >
+            {isFinalizing ? "Finalizing..." : "Finalize"}
+          </button>
         </div>
-        <button
-          type="button"
-          className={`btn-primary ${!canFinalize || isFinalizing || isLoading ? "opacity-50 cursor-not-allowed" : ""}`}
-          disabled={!canFinalize || isFinalizing || isLoading}
-          onClick={handleFinalize}
-        >
-          {isFinalizing ? "Finalizing..." : "Finalize"}
-        </button>
+
+        <div>
+          <h2 className="text-lg font-semibold text-white">Execute Proposal</h2>
+          <p className="text-sm text-gray-400">
+            Once passed and finalized, proposal actions can be triggered on-chain.
+          </p>
+          {proposal?.status !== "Passed" && (
+            <p className="text-xs text-gray-500 mt-1">
+              Available only for Passed proposals.
+            </p>
+          )}
+          <button
+            type="button"
+            className={`btn-primary w-full mt-4 ${proposal?.status !== "Passed" || isExecuting || isLoading ? "opacity-50 cursor-not-allowed" : ""}`}
+            disabled={proposal?.status !== "Passed" || isExecuting || isLoading}
+            onClick={handleExecute}
+          >
+            {isExecuting ? "Executing..." : "Execute Action"}
+          </button>
+        </div>
       </div>
 
       {/* Vote Actions (Sticky on Mobile) */}
       <div className="fixed bottom-0 inset-x-0 p-4 bg-gray-900 border-t border-stellar-border z-50 md:relative md:p-0 md:bg-transparent md:border-t-0 md:z-auto card md:card">
         <h2 className="hidden md:block text-lg font-semibold text-white mb-4">Cast Vote</h2>
         <div className="flex space-x-4">
-          <VoteButton proposalId={id} voteFor={true} votingClosed={proposal ? proposal.endsAt * 1000 <= nowMs : false} />
-          <VoteButton proposalId={id} voteFor={false} votingClosed={proposal ? proposal.endsAt * 1000 <= nowMs : false} />
+          <VoteButton
+            proposalId={id}
+            voteFor={true}
+            votingClosed={proposal ? (proposal.status !== "Active" || proposal.endsAt * 1000 <= nowMs) : false}
+          />
+          <VoteButton
+            proposalId={id}
+            voteFor={false}
+            votingClosed={proposal ? (proposal.status !== "Active" || proposal.endsAt * 1000 <= nowMs) : false}
+          />
         </div>
       </div>
     </div>

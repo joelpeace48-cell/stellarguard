@@ -171,7 +171,7 @@ export default function GovernancePage() {
             ))}
           </select>
         </div>
-        {error ? <p className="text-red-400 text-sm">{typeof error === "string" ? error : (error as Error).message}</p> : null}
+        {error ? <p className="text-red-400 text-sm">{typeof error === "string" ? error : error.message}</p> : null}
       </div>
 
       <div>

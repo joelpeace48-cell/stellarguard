@@ -15,6 +15,8 @@ export function MobileNav() {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
   const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const firstMenuItemRef = useRef<HTMLAnchorElement>(null);
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -28,13 +30,31 @@ export function MobileNav() {
 
   useEffect(() => { setOpen(false); }, [pathname]);
 
+  useEffect(() => {
+    if (open) {
+      firstMenuItemRef.current?.focus();
+    }
+  }, [open]);
+
+  const closeMenu = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+
   return (
     <div className="md:hidden relative" ref={menuRef}>
       <button
+        ref={triggerRef}
         aria-label={open ? "Close navigation menu" : "Open navigation menu"}
         aria-expanded={open}
         aria-controls="mobile-nav-menu"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          if (open) {
+            closeMenu();
+          } else {
+            setOpen(true);
+          }
+        }}
         className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-stellar-blue"
       >
         {open ? (
@@ -50,11 +70,12 @@ export function MobileNav() {
           role="menu"
           className="absolute right-0 top-full mt-2 w-48 rounded-xl border border-white/10 bg-stellar-darker/95 backdrop-blur-xl shadow-glass py-1 z-50"
         >
-          {NAV_LINKS.map(({ href, label }) => (
+          {NAV_LINKS.map(({ href, label }, index) => (
             <Link
               key={href}
               href={href}
               role="menuitem"
+              ref={index === 0 ? firstMenuItemRef : undefined}
               className="block px-4 py-2.5 text-sm font-medium text-gray-300 hover:text-white hover:bg-white/10 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-stellar-blue"
             >
               {label}

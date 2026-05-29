@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { useTreasury } from "@/hooks/useTreasury";
 import { useFreighter } from "@/hooks/useFreighter";
@@ -55,6 +55,22 @@ export default function TreasuryPage() {
   >("pending");
   const threshold = config?.threshold ?? 0;
   const signerCount = config?.signerCount ?? 0;
+
+  // Escape key handler for transaction details drawer
+  useEffect(() => {
+    if (!selectedTx) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedTx(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedTx]);
 
   const pendingTxs = useMemo(
     () => transactions.filter((transaction) => !transaction.executed),
@@ -185,12 +201,24 @@ export default function TreasuryPage() {
 
       <div className="card">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <input
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            className="w-full rounded-lg border border-stellar-border bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-primary-500"
-            placeholder="Search by tx ID, address, or status"
-          />
+          <div className="relative">
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              className="w-full rounded-lg border border-stellar-border bg-gray-900 px-3 py-2 pr-8 text-sm text-white outline-none focus:border-primary-500"
+              placeholder="Search by tx ID, address, or status"
+              aria-label="Search transactions"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white transition-colors"
+                aria-label="Clear search"
+              >
+                ✕
+              </button>
+            )}
+          </div>
           <select
             value={statusFilter}
             onChange={(event) =>

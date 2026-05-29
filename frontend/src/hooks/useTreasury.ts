@@ -69,46 +69,23 @@ export function useTreasury() {
   }, []);
 
   const fetchBalance = useCallback(
-    async (requestId: number, signal: AbortSignal) => {
-      const result = await readContractValue(
-        CONTRACT_IDS.treasury,
-        "get_balance",
-        [],
-        {
-          decoder: decodeBigInt,
-          signal,
-          sourceAddress: address ?? undefined,
-        },
-      );
-
-      if (requestGuardRef.current.isCurrent(requestId)) {
-        setBalance(result);
-      }
-
-      return result;
+    async (signal: AbortSignal) => {
+      return readContractValue(CONTRACT_IDS.treasury, "get_balance", [], {
+        decoder: decodeBigInt,
+        signal,
+        sourceAddress: address ?? undefined,
+      });
     },
     [address],
   );
 
   const fetchConfig = useCallback(
-    async (requestId: number, signal: AbortSignal) => {
-      const result = await readContractValue(
-        CONTRACT_IDS.treasury,
-        "get_config",
-        [],
-        {
-          decoder: decodeTreasuryConfig,
-          signal,
-          sourceAddress: address ?? undefined,
-        },
-      );
-
-      if (requestGuardRef.current.isCurrent(requestId)) {
-        setConfig(result);
-        setBalance(result.balance);
-      }
-
-      return result;
+    async (signal: AbortSignal) => {
+      return readContractValue(CONTRACT_IDS.treasury, "get_config", [], {
+        decoder: decodeTreasuryConfig,
+        signal,
+        sourceAddress: address ?? undefined,
+      });
     },
     [address],
   );
@@ -181,8 +158,8 @@ export function useTreasury() {
 
     try {
       const [currentBalance, currentConfig] = await Promise.all([
-        fetchBalance(request.id, request.signal),
-        fetchConfig(request.id, request.signal),
+        fetchBalance(request.signal),
+        fetchConfig(request.signal),
       ]);
 
       await fetchTransactions(
@@ -192,6 +169,7 @@ export function useTreasury() {
       );
 
       if (requestGuardRef.current.isCurrent(request.id)) {
+        setConfig(currentConfig);
         setBalance(currentConfig.balance ?? currentBalance);
       }
     } catch (err: unknown) {
@@ -440,6 +418,18 @@ export function useTreasury() {
   const clearError = useCallback(() => {
     setError(null);
   }, []);
+
+  // Clear stale data and cancel in-flight requests when the wallet disconnects.
+  useEffect(() => {
+    if (!address) {
+      requestGuardRef.current.cancel("Wallet disconnected.");
+      setBalance(BigInt(0));
+      setConfig(null);
+      setTransactions([]);
+      setError(null);
+      setTxActions(new Map());
+    }
+  }, [address]);
 
   useEffect(() => {
     const requestGuard = requestGuardRef.current;

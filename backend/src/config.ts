@@ -14,7 +14,7 @@ export interface Config {
   dbPoolMax: number;
 }
 
-function getContractIds(): string[] {
+export function getContractIds(): string[] {
   const ids: string[] = [];
   const envKeys = [
     "TREASURY_CONTRACT_ID",
@@ -67,7 +67,7 @@ export function loadConfig(): Config {
   if (contractIds.length === 0) {
     console.warn(
       "Warning: No contract IDs configured. Set at least one of: " +
-        "TREASURY_CONTRACT_ID, GOVERNANCE_CONTRACT_ID, TOKEN_VAULT_CONTRACT_ID, ACCESS_CONTROL_CONTRACT_ID"
+        "TREASURY_CONTRACT_ID, GOVERNANCE_CONTRACT_ID, TOKEN_VAULT_CONTRACT_ID, ACCESS_CONTROL_CONTRACT_ID",
     );
   }
 
@@ -76,7 +76,7 @@ export function loadConfig(): Config {
     (Array.isArray(corsOrigin) && corsOrigin.includes("*"));
   if (nodeEnv === "production" && wildcardCors) {
     console.warn(
-      "Warning: CORS_ORIGIN resolves to '*' while NODE_ENV=production. Restrict CORS_ORIGIN before deploying."
+      "Warning: CORS_ORIGIN resolves to '*' while NODE_ENV=production. Restrict CORS_ORIGIN before deploying.",
     );
   }
 

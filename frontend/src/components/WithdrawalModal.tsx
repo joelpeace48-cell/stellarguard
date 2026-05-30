@@ -185,9 +185,22 @@ export function WithdrawalModal({
               <label htmlFor="wd-amount" className="text-sm font-medium">
                 Amount
               </label>
-              <span className="text-xs text-slate-500">
-                Balance: {balanceXlm.toFixed(7)} XLM
-              </span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAmount(balanceXlm.toString());
+                    setSubmitError(null);
+                  }}
+                  disabled={isProposing || balanceXlm <= 0}
+                  className="text-xs font-medium text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 dark:hover:text-indigo-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Max
+                </button>
+                <span className="text-xs text-slate-500">
+                  Balance: {balanceXlm.toFixed(7)} XLM
+                </span>
+              </div>
             </div>
             <div className="relative">
               <input

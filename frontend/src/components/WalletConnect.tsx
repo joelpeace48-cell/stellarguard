@@ -31,22 +31,24 @@ export const WalletConnect = () => {
 
   if (address) {
     return (
-      <div className="flex items-center space-x-3">
-        <div className="text-sm font-mono bg-white/5 px-3 py-1.5 rounded-lg border border-white/10 text-stellar-blue">
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3 justify-end">
+        <div className="text-xs sm:text-sm font-mono bg-white/5 px-2.5 py-1.5 rounded-lg border border-white/10 text-stellar-blue whitespace-nowrap">
           {formatAddress(address)}
         </div>
-        <CopyButton
-          value={address}
-          label="wallet address"
-          className="text-[11px]"
-        />
-        <button 
-          onClick={disconnect}
-          className="text-xs text-gray-500 hover:text-white transition-colors"
-          aria-label="Disconnect wallet from StellarGuard"
-        >
-          Disconnect
-        </button>
+        <div className="flex items-center gap-2">
+          <CopyButton
+            value={address}
+            label="wallet address"
+            className="text-[11px]"
+          />
+          <button 
+            onClick={disconnect}
+            className="text-xs text-gray-500 hover:text-white transition-colors whitespace-nowrap"
+            aria-label="Disconnect wallet from StellarGuard"
+          >
+            Disconnect
+          </button>
+        </div>
       </div>
     );
   }

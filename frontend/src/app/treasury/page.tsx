@@ -9,6 +9,7 @@ import { ERROR_CODE_LABELS } from "@/lib/errors";
 import { WalletConnect } from "@/components/WalletConnect";
 import { CopyButton } from "@/components/CopyButton";
 import type { TreasuryTransaction } from "@/lib/contractData";
+import { TreasuryFilters } from "@/components/treasury/TreasuryFilters";
 
 const TreasuryCard = dynamic(() =>
   import("@/components/TreasuryCard").then((module) => module.TreasuryCard),
@@ -199,45 +200,13 @@ export default function TreasuryPage() {
         </div>
       </div>
 
-      <div className="card">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <div className="relative">
-            <input
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              className="w-full rounded-lg border border-stellar-border bg-gray-900 px-3 py-2 pr-8 text-sm text-white outline-none focus:border-primary-500"
-              placeholder="Search by tx ID, address, or status"
-              aria-label="Search transactions"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery("")}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white transition-colors"
-                aria-label="Clear search"
-              >
-                ✕
-              </button>
-            )}
-          </div>
-          <select
-            value={statusFilter}
-            onChange={(event) =>
-              setStatusFilter(
-                event.target.value as "pending" | "ready" | "executed",
-              )
-            }
-            className="w-full rounded-lg border border-stellar-border bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-primary-500"
-          >
-            <option value="pending">Pending Approval</option>
-            <option value="ready">Ready to Execute</option>
-            <option value="executed">Executed</option>
-          </select>
-          <div className="text-xs text-gray-400 flex items-center md:justify-end">
-            {filteredTransactions.length} matching transaction
-            {filteredTransactions.length === 1 ? "" : "s"}
-          </div>
-        </div>
-      </div>
+      <TreasuryFilters
+        query={searchQuery}
+        status={statusFilter}
+        resultCount={filteredTransactions.length}
+        onQueryChange={setSearchQuery}
+        onStatusChange={setStatusFilter}
+      />
 
       {isNetworkMismatch && (
         <div className="card border-red-500/40 bg-red-950/20">
@@ -327,12 +296,25 @@ export default function TreasuryPage() {
           {pendingTxs.filter((transaction) =>
             filteredTransactions.some((item) => item.id === transaction.id),
           ).length === 0 ? (
-            <div className="card">
-              <p className="text-gray-500 text-center py-8">
+            <div className="card text-center py-8">
+              <p className="text-gray-500 mb-4">
                 {isLoading
                   ? "Loading transactions..."
-                  : "No pending transactions."}
+                  : transactions.length === 0
+                    ? "No treasury transactions yet."
+                    : "No transactions match your current filters."}
               </p>
+              {!isLoading && transactions.length > 0 && (
+                <button
+                  onClick={() => {
+                    setSearchQuery("");
+                    setStatusFilter("pending");
+                  }}
+                  className="btn-secondary text-sm"
+                >
+                  Reset Filters
+                </button>
+              )}
             </div>
           ) : (
             pendingTxs
@@ -392,10 +374,25 @@ export default function TreasuryPage() {
             <tbody>
               {filteredHistoryTxs.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="text-center text-gray-500 py-8">
-                    {isLoading
-                      ? "Loading execution history..."
-                      : "No executed transactions for the current filters."}
+                  <td colSpan={5} className="text-center py-8">
+                    <p className="text-gray-500 mb-4">
+                      {isLoading
+                        ? "Loading execution history..."
+                        : transactions.length === 0
+                          ? "No treasury transactions yet."
+                          : "No transactions match your current filters."}
+                    </p>
+                    {!isLoading && transactions.length > 0 && (
+                      <button
+                        onClick={() => {
+                          setSearchQuery("");
+                          setStatusFilter("executed");
+                        }}
+                        className="btn-secondary text-sm"
+                      >
+                        Reset Filters
+                      </button>
+                    )}
                   </td>
                 </tr>
               ) : (

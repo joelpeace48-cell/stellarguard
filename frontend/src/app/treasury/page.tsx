@@ -181,7 +181,41 @@ export default function TreasuryPage() {
       </div>
 
       <div>
-        <h2 className="text-xl font-semibold text-white mb-4">Execution History</h2>
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-semibold text-white">Execution History</h2>
+          <button
+            disabled={historyTxs.length === 0}
+            title={
+              historyTxs.length === 0
+                ? "CSV export is unavailable — no executed transactions match the current filter"
+                : "Export executed transactions as CSV"
+            }
+            aria-label={
+              historyTxs.length === 0
+                ? "Export CSV disabled: no executed transactions match the current filter"
+                : "Export executed transactions as CSV"
+            }
+            aria-disabled={historyTxs.length === 0}
+            className="btn-secondary text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+            onClick={() => {
+              if (historyTxs.length === 0) return;
+              const header = "ID,Destination,Amount (XLM),Time";
+              const rows = historyTxs.map((t) =>
+                [t.id, t.to, formatXlm(t.amount), formatAbsoluteDate(t.createdAt * 1000)].join(","),
+              );
+              const csv = [header, ...rows].join("\n");
+              const blob = new Blob([csv], { type: "text/csv" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = "treasury-history.csv";
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+          >
+            Export CSV
+          </button>
+        </div>
         <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead>

@@ -38,6 +38,8 @@ pub enum Error {
     NothingToClaim = 11,
     /// Signer already approved emergency unlock.
     AlreadyApprovedEmergency = 12,
+    /// Arithmetic overflow occurred.
+    Overflow = 13,
 }
 
 // ============================================================================
@@ -206,12 +208,12 @@ impl TokenVaultContract {
         owner.require_auth();
 
         // Get and increment lock counter
-        let lock_id: u64 = env
+        let current_lock_counter: u64 = env
             .storage()
             .instance()
             .get(&DataKey::LockCounter)
-            .unwrap_or(0)
-            + 1;
+            .unwrap_or(0);
+        let lock_id = current_lock_counter.checked_add(1).ok_or(Error::Overflow)?;
         env.storage()
             .instance()
             .set(&DataKey::LockCounter, &lock_id);
@@ -437,9 +439,11 @@ impl TokenVaultContract {
             .instance()
             .set(&DataKey::TotalLocked, &new_total);
 
+        let owner = lock.owner.clone();
+
         env.events().publish(
             (symbol_short!("vault"), symbol_short!("emrg_ex")),
-            (lock_id, caller.clone(), amount),
+            (lock_id, caller.clone(), owner, amount),
         );
 
         Ok(amount)
@@ -479,12 +483,14 @@ impl TokenVaultContract {
             return Err(Error::InvalidDuration);
         }
 
-        let vesting_id: u64 = env
+        let current_vesting_counter: u64 = env
             .storage()
             .instance()
             .get(&DataKey::VestingCounter)
-            .unwrap_or(0)
-            + 1;
+            .unwrap_or(0);
+        let vesting_id = current_vesting_counter
+            .checked_add(1)
+            .ok_or(Error::Overflow)?;
         env.storage()
             .instance()
             .set(&DataKey::VestingCounter, &vesting_id);
@@ -615,6 +621,82 @@ impl TokenVaultContract {
             .ok_or(Error::VestingNotFound)
     }
 
+    /// List locks owned by an address with pagination.
+    ///
+    /// Returns entries where `lock.owner == owner`, scanning IDs after `start_after_id`
+    /// and returning at most `limit` records.
+    pub fn get_locks_by_owner(
+        env: Env,
+        owner: Address,
+        start_after_id: u64,
+        limit: u32,
+    ) -> Vec<TokenLock> {
+        let mut locks = Vec::new(&env);
+        if limit == 0 {
+            return locks;
+        }
+
+        let max_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LockCounter)
+            .unwrap_or(0);
+
+        let mut current_id = start_after_id.checked_add(1).unwrap_or(u64::MAX);
+        while current_id <= max_id && locks.len() < limit {
+            if let Some(lock) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, TokenLock>(&DataKey::Lock(current_id))
+            {
+                if lock.owner == owner {
+                    locks.push_back(lock);
+                }
+            }
+            current_id = current_id.saturating_add(1);
+        }
+
+        locks
+    }
+
+    /// List vesting schedules for a beneficiary with pagination.
+    ///
+    /// Returns entries where `schedule.beneficiary == beneficiary`, scanning IDs
+    /// after `start_after_id` and returning at most `limit` records.
+    pub fn get_vestings_by_beneficiary(
+        env: Env,
+        beneficiary: Address,
+        start_after_id: u64,
+        limit: u32,
+    ) -> Vec<VestingSchedule> {
+        let mut schedules = Vec::new(&env);
+        if limit == 0 {
+            return schedules;
+        }
+
+        let max_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VestingCounter)
+            .unwrap_or(0);
+
+        let mut current_id = start_after_id.checked_add(1).unwrap_or(u64::MAX);
+        while current_id <= max_id && schedules.len() < limit {
+            if let Some(schedule) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, VestingSchedule>(&DataKey::Vesting(current_id))
+            {
+                if schedule.beneficiary == beneficiary {
+                    schedules.push_back(schedule);
+                }
+            }
+            current_id = current_id.saturating_add(1);
+        }
+
+        schedules
+    }
+
     /// Get vault statistics.
     pub fn get_stats(env: Env) -> Result<VaultStats, Error> {
         Self::require_initialized(&env)?;
@@ -722,7 +804,7 @@ mod test {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Events as _;
     use soroban_sdk::testutils::Ledger as _;
-    use soroban_sdk::{vec, Env, IntoVal, TryFromVal, Val, Vec};
+    use soroban_sdk::{vec, BytesN, Env, IntoVal, TryFromVal, Val, Vec};
 
     fn setup_contract() -> (Env, Address, Address, TokenVaultContractClient<'static>) {
         let env = Env::default();
@@ -731,6 +813,10 @@ mod test {
         let client = TokenVaultContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         (env, admin, contract_id, client)
+    }
+
+    fn wasm_hash(env: &Env) -> BytesN<32> {
+        BytesN::from_array(env, &[0; 32])
     }
 
     #[test]
@@ -1141,11 +1227,37 @@ mod test {
         let expected_data: Vec<Val> = vec![
             &env,
             lock_id.into_val(&env),
+            owner.clone().into_val(&env),
             owner.into_val(&env),
             900_000i128.into_val(&env),
         ];
         let actual_data: Vec<Val> = Vec::try_from_val(&env, &event.2).unwrap();
         assert_eq!(actual_data, expected_data);
+    }
+
+    #[test]
+    fn test_emergency_unlock_can_be_called_by_non_owner() {
+        let (env, admin, _contract_id, client) = setup_contract();
+
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = Vec::from_array(&env, [signer1.clone(), signer2.clone()]);
+        client.initialize(&admin, &signers, &2);
+
+        let owner = Address::generate(&env);
+        let lock_id = client.lock_tokens(&owner, &500_000, &86400, &symbol_short!("team"));
+
+        client.approve_emergency(&signer1, &lock_id);
+        client.approve_emergency(&signer2, &lock_id);
+
+        // Any address can trigger emergency_unlock once threshold is met
+        let third_party = Address::generate(&env);
+        let unlocked = client.emergency_unlock(&third_party, &lock_id);
+        assert_eq!(unlocked, 500_000);
+
+        let lock = client.get_lock(&lock_id);
+        assert_eq!(lock.claimed, true);
+        assert_eq!(lock.owner, owner);
     }
 
     #[test]
@@ -1230,5 +1342,202 @@ mod test {
         client.approve_emergency(&signer1, &lock_id);
         let result = client.try_approve_emergency(&signer1, &lock_id);
         assert_eq!(result, Err(Ok(Error::AlreadyApprovedEmergency)));
+    }
+
+    #[test]
+    fn test_lock_tokens_rejects_counter_overflow() {
+        let (env, admin, contract_id, client) = setup_contract();
+
+        let signer1 = Address::generate(&env);
+        let signers = Vec::from_array(&env, [signer1.clone()]);
+        client.initialize(&admin, &signers, &1);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::LockCounter, &u64::MAX);
+        });
+
+        let owner = Address::generate(&env);
+        let result = client.try_lock_tokens(&owner, &1_000_000, &3_600, &symbol_short!("safe"));
+        assert_eq!(result, Err(Ok(Error::Overflow)));
+    }
+
+    #[test]
+    fn test_create_vesting_rejects_counter_overflow() {
+        let (env, admin, contract_id, client) = setup_contract();
+
+        let signer1 = Address::generate(&env);
+        let signers = Vec::from_array(&env, [signer1.clone()]);
+        client.initialize(&admin, &signers, &1);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::VestingCounter, &u64::MAX);
+        });
+
+        let beneficiary = Address::generate(&env);
+        let result = client.try_create_vesting(
+            &admin,
+            &beneficiary,
+            &1_000_000,
+            &31_536_000,
+            &0,
+            &symbol_short!("team"),
+        );
+        assert_eq!(result, Err(Ok(Error::Overflow)));
+    }
+
+    #[test]
+    fn test_get_locks_by_owner_supports_pagination() {
+        let (env, admin, _contract_id, client) = setup_contract();
+
+        let signer1 = Address::generate(&env);
+        let signers = Vec::from_array(&env, [signer1.clone()]);
+        client.initialize(&admin, &signers, &1);
+
+        let owner = Address::generate(&env);
+        let other_owner = Address::generate(&env);
+
+        client.lock_tokens(&owner, &100_000, &100, &symbol_short!("one"));
+        let second_owner_lock =
+            client.lock_tokens(&other_owner, &200_000, &100, &symbol_short!("oth"));
+        let third_owner_lock = client.lock_tokens(&owner, &300_000, &100, &symbol_short!("two"));
+        let fourth_owner_lock = client.lock_tokens(&owner, &400_000, &100, &symbol_short!("tre"));
+
+        let first_page = client.get_locks_by_owner(&owner, &0, &2);
+        assert_eq!(first_page.len(), 2);
+        assert_eq!(first_page.get(0).unwrap().id, 1);
+        assert_eq!(first_page.get(1).unwrap().id, third_owner_lock);
+
+        let second_page = client.get_locks_by_owner(&owner, &third_owner_lock, &2);
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page.get(0).unwrap().id, fourth_owner_lock);
+
+        let empty_page = client.get_locks_by_owner(&owner, &second_owner_lock, &0);
+        assert_eq!(empty_page.len(), 0);
+    }
+
+    #[test]
+    fn test_get_vestings_by_beneficiary_supports_pagination() {
+        let (env, admin, _contract_id, client) = setup_contract();
+
+        let signer1 = Address::generate(&env);
+        let signers = Vec::from_array(&env, [signer1.clone()]);
+        client.initialize(&admin, &signers, &1);
+
+        let beneficiary = Address::generate(&env);
+        let other_beneficiary = Address::generate(&env);
+
+        client.create_vesting(
+            &admin,
+            &beneficiary,
+            &100_000,
+            &100,
+            &10,
+            &symbol_short!("one"),
+        );
+        let second_vesting = client.create_vesting(
+            &admin,
+            &other_beneficiary,
+            &200_000,
+            &100,
+            &10,
+            &symbol_short!("oth"),
+        );
+        let third_vesting = client.create_vesting(
+            &admin,
+            &beneficiary,
+            &300_000,
+            &100,
+            &10,
+            &symbol_short!("two"),
+        );
+        let fourth_vesting = client.create_vesting(
+            &admin,
+            &beneficiary,
+            &400_000,
+            &100,
+            &10,
+            &symbol_short!("tre"),
+        );
+
+        let first_page = client.get_vestings_by_beneficiary(&beneficiary, &0, &2);
+        assert_eq!(first_page.len(), 2);
+        assert_eq!(first_page.get(0).unwrap().id, 1);
+        assert_eq!(first_page.get(1).unwrap().id, third_vesting);
+
+        let second_page = client.get_vestings_by_beneficiary(&beneficiary, &third_vesting, &2);
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page.get(0).unwrap().id, fourth_vesting);
+
+        let empty_page = client.get_vestings_by_beneficiary(&beneficiary, &second_vesting, &0);
+        assert_eq!(empty_page.len(), 0);
+    }
+
+    // =========================================================================
+    // Negative Path Tests (TEST-3)
+    // =========================================================================
+
+    #[test]
+    fn test_claim_before_cliff_returns_nothing_to_claim() {
+        let (env, admin, _contract_id, client) = setup_contract();
+
+        let signer1 = Address::generate(&env);
+        let signers = Vec::from_array(&env, [signer1.clone()]);
+        client.initialize(&admin, &signers, &1);
+
+        let start_time = 1_000;
+        env.ledger().set_timestamp(start_time);
+
+        let beneficiary = Address::generate(&env);
+        let vesting_id = client.create_vesting(
+            &admin,
+            &beneficiary,
+            &1_000_000,
+            &120,
+            &30,
+            &symbol_short!("team"),
+        );
+
+        // Try to claim before cliff
+        env.ledger().set_timestamp(start_time + 29);
+        let result = client.try_claim_vested(&beneficiary, &vesting_id);
+        assert_eq!(result, Err(Ok(Error::NothingToClaim)));
+    }
+
+    #[test]
+    fn test_create_vesting_with_zero_duration_returns_invalid_duration() {
+        let (env, admin, _contract_id, client) = setup_contract();
+
+        let signer1 = Address::generate(&env);
+        let signers = Vec::from_array(&env, [signer1.clone()]);
+        client.initialize(&admin, &signers, &1);
+
+        let beneficiary = Address::generate(&env);
+        let result = client.try_create_vesting(
+            &admin,
+            &beneficiary,
+            &1_000_000,
+            &0, // Zero duration
+            &0,
+            &symbol_short!("team"),
+        );
+        assert_eq!(result, Err(Ok(Error::InvalidDuration)));
+    }
+
+    #[test]
+    fn test_upgrade_rejects_non_admin() {
+        let (env, admin, _contract_id, client) = setup_contract();
+
+        let signer1 = Address::generate(&env);
+        let signers = Vec::from_array(&env, [signer1.clone()]);
+        client.initialize(&admin, &signers, &1);
+
+        let outsider = Address::generate(&env);
+        let wasm_hash = wasm_hash(&env);
+        let result = client.try_upgrade(&outsider, &wasm_hash);
+        assert_eq!(result, Err(Ok(Error::Unauthorized)));
     }
 }

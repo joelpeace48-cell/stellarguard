@@ -1,88 +1,96 @@
-"use client";
-
-import { useState, useEffect } from "react";
-import { useGovernance } from "@/hooks/useGovernance";
+import React from "react";
 import { toast } from "react-hot-toast";
+import { useFreighter } from "@/hooks/useFreighter";
+import { useGovernance } from "@/hooks/useGovernance";
+import { trackEvent } from "@/lib/analytics";
 
 interface VoteButtonProps {
-  /** Proposal ID */
   proposalId: number;
-  /** Vote direction */
   voteFor: boolean;
-  /** Whether voting is closed */
-  votingClosed?: boolean;
-  /** Callback after vote is submitted (optional) */
+  hasVoted: boolean;
+  votingClosed: boolean;
+  isPending?: boolean;
   onVoteSuccess?: () => void;
 }
 
-/**
- * Button component for casting votes on governance proposals.
- * Handles loading states, disabled states, optimistic pending state,
- * and visual feedback.
- */
-export function VoteButton({
+export const VoteButton: React.FC<VoteButtonProps> = ({
   proposalId,
   voteFor,
-  votingClosed = false,
+  hasVoted,
+  votingClosed,
+  isPending = false,
   onVoteSuccess,
-}: VoteButtonProps) {
-  const { vote, hasVoted: checkHasVoted, isLoading: isVoting } = useGovernance();
-  const [alreadyVoted, setAlreadyVoted] = useState(false);
-  const [isChecking, setIsChecking] = useState(true);
+}) => {
+  const { isConnected } = useFreighter();
+  const { vote, pendingVotes } = useGovernance();
 
-  useEffect(() => {
-    const updateVoteStatus = async () => {
-      try {
-        const voted = await checkHasVoted(proposalId);
-        setAlreadyVoted(voted);
-      } catch (err) {
-        console.error("Failed to check vote status:", err);
-      } finally {
-        setIsChecking(false);
-      }
-    };
+  // Use per-proposal pending state from the map rather than the global isLoading
+  // flag so that voting on one proposal doesn't disable buttons on others.
+  const isThisVotePending = isPending || pendingVotes.has(proposalId);
 
-    updateVoteStatus();
-  }, [proposalId, checkHasVoted]);
+  const isDisabled =
+    hasVoted || votingClosed || !isConnected || isThisVotePending;
 
-  const isDisabled = alreadyVoted || votingClosed || isVoting || isChecking;
-
-  const label = voteFor ? "✅ Vote For" : "❌ Vote Against";
-  const disabledLabel = alreadyVoted
-    ? "Already Voted"
-    : votingClosed
-      ? "Voting Closed"
-      : isVoting
-        ? "Casting Vote..."
-        : label;
-
-  const baseClass = voteFor
-    ? "bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium shadow-lg"
-    : "bg-transparent border border-red-700 hover:bg-red-900/30 text-red-500 rounded-lg transition-all font-medium";
-
-  const handleClick = async () => {
-    if (isDisabled) return;
-
-    const toastId = toast.loading(`Casting vote ${voteFor ? "FOR" : "AGAINST"}...`);
+  const handleVote = async () => {
+    if (isDisabled) {
+      return;
+    }
 
     try {
       await vote(proposalId, voteFor);
-      setAlreadyVoted(true);
-      toast.success("Vote cast successfully!", { id: toastId });
-      if (onVoteSuccess) onVoteSuccess();
-    } catch (err: any) {
-      console.error("Vote failed:", err);
-      toast.error(err.message || "Failed to cast vote. Try again.", { id: toastId });
+      trackEvent({
+        name: "proposal_vote",
+        properties: { proposalId: String(proposalId), vote: voteFor ? "for" : "against" },
+      });
+      toast.success(
+        `Vote submitted ${voteFor ? "for" : "against"} proposal #${proposalId}`,
+      );
+      await onVoteSuccess?.();
+    } catch (error: unknown) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to cast vote",
+      );
+      console.error(error);
     }
   };
 
+  const disabledReason = hasVoted
+    ? "You have already voted on this proposal"
+    : votingClosed
+      ? "Voting is closed"
+      : !isConnected
+        ? "Connect your wallet to vote"
+        : isThisVotePending
+          ? "Waiting for vote confirmation"
+          : "";
+
+  const baseLabel = voteFor ? "Vote For" : "Vote Against";
+  const ariaLabel = disabledReason
+    ? `${baseLabel}: ${disabledReason}`
+    : baseLabel;
+  const descId = `vote-desc-${proposalId}-${voteFor ? "for" : "against"}`;
+
   return (
-    <button
-      className={`${baseClass} flex-1 py-3 px-4 ${isDisabled ? "opacity-50 cursor-not-allowed" : ""}`}
-      disabled={isDisabled}
-      onClick={handleClick}
-    >
-      {isDisabled ? disabledLabel : label}
-    </button>
+    <>
+      {isDisabled && disabledReason && (
+        <span id={descId} className="sr-only">
+          {disabledReason}
+        </span>
+      )}
+      <button
+        aria-label={ariaLabel}
+        aria-describedby={isDisabled && disabledReason ? descId : undefined}
+        className={`${voteFor ? "btn-primary" : "btn-secondary"} focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900`}
+        disabled={isDisabled}
+        onClick={handleVote}
+        type="button"
+      >
+        {isThisVotePending
+          ? "Submitting..."
+          : voteFor
+            ? "Vote For"
+            : "Vote Against"}
+      </button>
+    </>
   );
-}
+};

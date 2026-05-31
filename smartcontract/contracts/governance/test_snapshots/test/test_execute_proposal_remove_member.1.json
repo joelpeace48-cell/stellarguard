@@ -55,10 +55,10 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "symbol": "rem_mem"
+                  "string": "rem_mem"
                 },
                 {
-                  "symbol": "rem"
+                  "string": "rem"
                 },
                 {
                   "vec": [
@@ -263,7 +263,7 @@
                         "symbol": "description"
                       },
                       "val": {
-                        "symbol": "rem"
+                        "string": "rem"
                       }
                     },
                     {
@@ -315,7 +315,7 @@
                         "symbol": "title"
                       },
                       "val": {
-                        "symbol": "rem_mem"
+                        "string": "rem_mem"
                       }
                     },
                     {
@@ -944,10 +944,10 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "symbol": "rem_mem"
+                  "string": "rem_mem"
                 },
                 {
-                  "symbol": "rem"
+                  "string": "rem"
                 },
                 {
                   "vec": [
@@ -1570,7 +1570,7 @@
                     "symbol": "description"
                   },
                   "val": {
-                    "symbol": "rem"
+                    "string": "rem"
                   }
                 },
                 {
@@ -1622,7 +1622,7 @@
                     "symbol": "title"
                   },
                   "val": {
-                    "symbol": "rem_mem"
+                    "string": "rem_mem"
                   }
                 },
                 {

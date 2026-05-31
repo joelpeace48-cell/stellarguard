@@ -68,16 +68,42 @@ Public API:
 
 Events:
 
-- `(treasury, init)` payload example: `(admin_address, 2_u32, 3_u32)`
-- `(treasury, deposit)` payload example: `(depositor_address, 1_000_000_i128, 1_000_000_i128)`
-- `(treasury, dep_tok)` payload example: `(depositor_address, token_contract, 500_i128, 1_500_i128)`
-- `(treasury, propose)` payload example: `(1_u64, proposer_address, recipient_address, 3_000_000_i128)`
-- `(treasury, approve)` payload example: `(1_u64, signer_address, 2_u32)`
-- `(treasury, execute)` payload example: `(1_u64, recipient_address, 3_000_000_i128, 5_000_000_i128)`
-- `(treasury, add_sig)` payload example: `(new_signer_address, 4_u32)`
-- `(treasury, rem_sig)` payload example: `(removed_signer_address, 2_u32)`
-- `(treasury, thresh)` payload example: `(old_threshold, new_threshold)`
-- `(treasury, admin)` payload example: `(old_admin, new_admin)`
+- `(treasury, init)` schema: `(admin: Address, threshold: u32, signer_count: u32)`; example: `(admin_address, 2_u32, 3_u32)`
+- `(treasury, deposit)` schema: `(from: Address, amount: i128, new_balance: i128)`; example: `(depositor_address, 1_000_000_i128, 1_000_000_i128)`
+- `(treasury, dep_tok)` schema: `(from: Address, token_address: Address, amount: i128, new_token_balance: i128)`; example: `(depositor_address, token_contract, 500_i128, 1_500_i128)`
+- `(treasury, propose)` schema: `(tx_id: u64, proposer: Address, to: Address, amount: i128)`; example: `(1_u64, proposer_address, recipient_address, 3_000_000_i128)`
+- `(treasury, approve)` schema: `(tx_id: u64, signer: Address, approval_count: u32)`; example: `(1_u64, signer_address, 2_u32)`
+- `(treasury, execute)` schema: `(tx_id: u64, to: Address, amount: i128, remaining_balance: i128)`; example: `(1_u64, recipient_address, 3_000_000_i128, 5_000_000_i128)`
+- `(treasury, add_sig)` schema: `(new_signer: Address, signer_count: u32)`; example: `(new_signer_address, 4_u32)`
+- `(treasury, rem_sig)` schema: `(removed_signer: Address, signer_count: u32)`; example: `(removed_signer_address, 2_u32)`
+- `(treasury, thresh)` schema: `(old_threshold: u32, new_threshold: u32)`; example: `(2_u32, 3_u32)`
+- `(treasury, admin)` schema: `(old_admin: Address, new_admin: Address)`; example: `(old_admin, new_admin)`
+
+### Deposit flow
+
+`deposit(from, amount)` is **not** a bookkeeping-only call. The contract
+performs an on-chain SEP-41 transfer from the depositor into itself before
+updating its stored balance:
+
+1. The contract enforces that it is initialized and that `amount > 0`.
+2. `from.require_auth()` fires, so the depositor must sign the invocation
+   (or, in tests, be mocked via `mock_all_auths()`).
+3. The contract loads the configured `Asset` (the SAC/SEP-41 contract that
+   was passed to `initialize`) and constructs a `token::TokenClient`.
+4. `token_client.transfer(&from, &env.current_contract_address(), &amount)`
+   moves the funds on-chain. If the depositor lacks the balance the SAC
+   contract panics and the deposit is reverted atomically — no partial
+   bookkeeping is written.
+5. Only after the transfer succeeds does the contract increment
+   `DataKey::Balance` and emit `(treasury, deposit)`.
+
+`deposit_token(from, token_address, amount)` follows the same pattern but
+targets an arbitrary SEP-41 token contract and persists balances under the
+per-`(depositor, token)` key `DataKey::TokenBalance`.
+
+The asymmetry with `propose_withdrawal` / `execute` is deliberate:
+withdrawals require multisig approval before the same `token_client.transfer`
+is invoked from the contract address to the recipient.
 
 ## Governance Contract
 
@@ -132,16 +158,21 @@ Finalization logic:
 - If quorum is met and `votes_for > votes_against`, status becomes `Passed`.
 - Otherwise status becomes `Rejected`.
 
+Execution note:
+
+- `AddMember` proposal execution now returns `Error::MemberAlreadyExists` when the
+  target is already in `Members`; this intentionally prevents silent no-op
+  executions.
+
 Events:
 
-- `(gov, init)` payload example: `(admin_address, 3_u32, 50_u32)`
-- `(gov, propose)` payload example: `(1_u64, proposer_address, ends_at_ledger, target_address, 0_i128)`
-- `(gov, vote)` payload example: `(1_u64, voter_address, true)`
-- `(gov, finalize)` payload example: `(1_u64, ProposalStatus::Passed)`
-- `(gov, exec)` payload example: `(1_u64, executor_address)`
-- `(gov, admin)` payload example: `(old_admin, new_admin)`
-- `(gov, quorum)` payload example: `(50_u32, 66_u32)`
-- `(gov, period)` payload example: `(1000_u32, 2000_u32)`
+- `(gov, init)` schema: `(admin: Address, member_count: u32, quorum_percent: u32)`; example: `(admin_address, 3_u32, 50_u32)`
+- `(gov, propose)` schema: `(proposal_id: u64, proposer: Address, ends_at: u32, target: Address, amount: i128)`; example: `(1_u64, proposer_address, ends_at_ledger, target_address, 0_i128)`
+- `(gov, vote)` schema: `(proposal_id: u64, voter: Address, vote_for: bool)`; example: `(1_u64, voter_address, true)`
+- `(gov, finalize)` schema: `(proposal_id: u64, status: ProposalStatus)`; example: `(1_u64, ProposalStatus::Passed)`
+- `(gov, exec)` schema: `(proposal_id: u64, executor: Address)`; example: `(1_u64, executor_address)`
+- `(gov, admin)` schema: `(old_admin: Address, new_admin: Address)`; example: `(old_admin, new_admin)`
+- `(gov, quorum)` schema: `(new_quorum_percent: u32)`; example: `(66_u32)`
 
 ## Token Vault Contract
 
@@ -178,25 +209,62 @@ Public API:
 - `lock_tokens(owner, amount, duration, memo)`
 - `claim(owner, lock_id)`
 - `approve_emergency(signer, lock_id)`
-- `emergency_unlock(caller, lock_id)`
+- `emergency_unlock(caller, lock_id)` — **caller-agnostic**: any address may trigger execution once the approval threshold is met; the caller does not need to be the lock owner or an emergency signer.
 - `create_vesting(admin, beneficiary, total_amount, duration, cliff, memo)`
 - `claim_vested(beneficiary, vesting_id)`
 - `get_lock(lock_id)`
 - `get_vesting(vesting_id)`
+- `get_locks_by_owner(owner, start_after_id, limit)`
+- `get_vestings_by_beneficiary(beneficiary, start_after_id, limit)`
 - `get_stats()`
 - `transfer_admin(current_admin, new_admin)`
 - `upgrade(admin, new_wasm_hash)`
 
 Events:
 
-- `(vault, init)` payload example: `(admin_address, 2_u32)`
-- `(vault, lock)` payload example: `(1_u64, owner_address, 400_000_i128, 120_u64)`
-- `(vault, claim)` payload example: `(1_u64, owner_address, 400_000_i128)`
-- `(vault, vest)` payload example: `(1_u64, beneficiary_address, 900_000_i128, 90_u64)`
-- `(vault, v_claim)` payload example: `(1_u64, beneficiary_address, 450_000_i128)`
-- `(vault, emrg_ap)` payload example: `(1_u64, signer_address, 2_u32)`
-- `(vault, emrg_ex)` payload example: `(1_u64, caller_address, 700_000_i128)`
-- `(vault, admin)` payload example: `(old_admin, new_admin)`
+- `(vault, init)` schema: `(admin: Address, emergency_signer_count: u32)`; example: `(admin_address, 2_u32)`
+- `(vault, lock)` schema: `(lock_id: u64, owner: Address, amount: i128, duration: u64)`; example: `(1_u64, owner_address, 400_000_i128, 120_u64)`
+- `(vault, claim)` schema: `(lock_id: u64, owner: Address, amount: i128)`; example: `(1_u64, owner_address, 400_000_i128)`
+- `(vault, vest)` schema: `(vesting_id: u64, beneficiary: Address, total_amount: i128, duration: u64)`; example: `(1_u64, beneficiary_address, 900_000_i128, 90_u64)`
+- `(vault, v_claim)` schema: `(vesting_id: u64, beneficiary: Address, claimable_amount: i128)`; example: `(1_u64, beneficiary_address, 450_000_i128)`
+- `(vault, emrg_ap)` schema: `(lock_id: u64, signer: Address, approval_count: u32)`; example: `(1_u64, signer_address, 2_u32)`
+- `(vault, emrg_ex)` schema: `(lock_id: u64, caller: Address, owner: Address, amount: i128)`; example: `(1_u64, caller_address, owner_address, 700_000_i128)`
+- `(vault, admin)` schema: `(old_admin: Address, new_admin: Address)`; example: `(old_admin, new_admin)`
+
+## Backend Event Parser Mapping
+
+Location: `backend/src/parser.ts`
+
+The backend event parser maps `(topic1, topic2)` to human-readable names via the
+`EVENT_NAMES` dictionary:
+
+- Treasury mappings:
+  - `deposit` -> `Treasury Deposit`
+  - `propose` -> `Treasury Propose`
+  - `approve` -> `Treasury Approve`
+  - `execute` -> `Treasury Execute`
+  - `init` -> `Treasury Initialize`
+  - `dep_tok` -> `Treasury Deposit Token`
+  - `add_sig` -> `Treasury Add Signer`
+  - `rem_sig` -> `Treasury Remove Signer`
+  - `thresh` -> `Treasury Threshold Change`
+  - `admin` -> `Treasury Admin Change`
+- Governance mappings:
+  - `propose` -> `Governance Propose`
+  - `vote` -> `Governance Vote`
+  - `finalize` -> `Governance Finalize`
+  - `exec` -> `Governance Execute`
+  - `init` -> `Governance Initialize`
+  - `admin` -> `Governance Admin Change`
+  - `quorum` -> `Governance Quorum Change`
+- Vault mappings:
+  - `lock` -> `Vault Lock`
+  - `claim` -> `Vault Claim`
+  - `vest` -> `Vault Vest`
+  - `v_claim` -> `Vault Vesting Claim`
+
+If a pair is not found, the parser stores `eventName: null` while still
+returning decoded topic/data payloads for downstream handling.
 
 ## Access Control Contract
 
@@ -214,6 +282,7 @@ State schema:
 - `Role(Address)`: stored `RoleAssignment` for an address.
 - `AllMembers`: address list for all assigned roles.
 - `RoleCount(u32)`: count of addresses per role level.
+- `RoleMembers(u32)`: address list for a specific role level.
 
 Core structs and enums:
 
@@ -232,6 +301,7 @@ Public API:
 - `is_member_or_above(address)`
 - `get_role(address)`
 - `get_all_members()`
+- `get_members_by_role(role)`
 - `get_summary()`
 - `transfer_ownership(current_owner, new_owner)`
 - `upgrade(owner, new_wasm_hash)`

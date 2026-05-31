@@ -1,177 +1,215 @@
+import React from "react";
 import { formatAddress, formatXlm } from "@/lib/formatters";
-import { CopyButton } from "@/components/CopyButton";
 
 interface TreasuryCardProps {
-  /** Transaction ID */
   txId: number;
-  /** Destination address */
   to: string;
-  /** Amount in stroops */
   amount: bigint;
-  /** Transaction memo */
   memo: string;
-  /** Current approver addresses */
-  approvals?: string[];
-  /** Required approval threshold */
+  approvals: string[];
   threshold: number;
-  /** Whether the transaction has been executed */
   executed: boolean;
-  /**
-   * Whether an approval for this transaction is currently in-flight.
-   * When true the button shows a pending state immediately (optimistic UI),
-   * before the chain confirms the approval.
-   */
   isPendingApproval?: boolean;
-  /** Whether execution for this transaction is currently in-flight. */
   isPendingExecution?: boolean;
-  /** Called when the user clicks Approve. Receives the txId. */
   onApprove?: (txId: number) => void;
-  /** Called when the user clicks Execute. Receives the txId. */
   onExecute?: (txId: number) => void;
+  currentAddress: string | null;
+  canSign: boolean;
 }
 
-/**
- * Card component for displaying a treasury transaction.
- * Shows transaction details, approval progress, and action buttons.
- * Supports optimistic approval state via `isPendingApproval`.
- */
-export function TreasuryCard({
+export const TreasuryCard: React.FC<TreasuryCardProps> = ({
   txId,
   to,
   amount,
   memo,
-  approvals = [],
+  approvals,
   threshold,
   executed,
-  isPendingApproval = false,
-  isPendingExecution = false,
+  isPendingApproval,
+  isPendingExecution,
   onApprove,
   onExecute,
-}: TreasuryCardProps) {
-  const approvalCount = approvals.length;
-  const statusColor = executed
-    ? "text-gray-400"
-    : approvalCount >= threshold
-      ? "text-green-400"
-      : "text-yellow-400";
+  currentAddress,
+  canSign,
+}) => {
+  const isReadyToExecute = approvals.length >= threshold;
+  const hasApproved =
+    currentAddress &&
+    approvals.some(
+      (addr) => addr.toLowerCase() === currentAddress.toLowerCase(),
+    );
 
-  const statusText = executed
-    ? "Executed"
-    : approvalCount >= threshold
-      ? "Ready"
-      : "Pending";
+  const approveDescId = `approve-desc-${txId}`;
+  const executeDescId = `execute-desc-${txId}`;
 
-  const canApprove = !executed && !isPendingApproval && !!onApprove;
-  const canExecute =
-    !executed &&
-    !isPendingExecution &&
-    approvalCount >= threshold &&
-    !!onExecute;
+  const approveDisabledReason = hasApproved
+    ? "You have already approved this transaction."
+    : !canSign
+      ? "You do not have signing permission for this treasury."
+      : isPendingApproval
+        ? "Approval is being confirmed on chain."
+        : undefined;
 
-  const handleApprove = () => {
-    if (canApprove) onApprove(txId);
-  };
-
-  const handleExecute = () => {
-    if (canExecute) onExecute(txId);
-  };
+  const executeDisabledReason = !canSign
+    ? "You do not have signing permission for this treasury."
+    : isPendingExecution
+      ? "Execution is being confirmed on chain."
+      : undefined;
 
   return (
-    <div className="card space-y-4">
-      <div className="flex justify-between items-center gap-3">
-        <div className="flex items-center space-x-3">
-          <span className="text-sm font-mono text-gray-500">#{txId}</span>
-          <CopyButton value={String(txId)} label={`transaction ${txId} id`} />
-          <span className={`text-xs font-semibold ${statusColor}`}>
-            {statusText}
-          </span>
-          {isPendingApproval && (
-            <span className="text-xs font-semibold text-primary-400 animate-pulse">
-              Approving...
+    <div className="card p-5 group hover:border-primary-500/50 transition-colors">
+      {/* Live region announces pending action state changes to screen readers */}
+      <div aria-live="polite" aria-atomic="true" className="sr-only">
+        {isPendingApproval && "Approval transaction pending confirmation."}
+        {isPendingExecution && "Execution transaction pending confirmation."}
+      </div>
+
+      <div className="flex justify-between items-start mb-4">
+        <div>
+          <h3 className="font-bold text-lg text-white">Transaction #{txId}</h3>
+          <p className="text-xs text-gray-500 mt-0.5">Created on-chain</p>
+        </div>
+        <div>
+          {executed ? (
+            <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2.5 py-0.5 text-xs font-medium text-green-500 border border-green-500/20">
+              <span aria-hidden="true">✓</span> Executed
             </span>
-          )}
-          {isPendingExecution && (
-            <span className="text-xs font-semibold text-primary-400 animate-pulse">
-              Executing...
+          ) : isReadyToExecute ? (
+            <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2.5 py-0.5 text-xs font-medium text-blue-500 border border-blue-500/20">
+              <span aria-hidden="true">▶</span> Ready to Execute
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded-full bg-yellow-500/10 px-2.5 py-0.5 text-xs font-medium text-yellow-500 border border-yellow-500/20">
+              <span aria-hidden="true">○</span> Pending Approvals
             </span>
           )}
         </div>
-        <p className="text-sm text-gray-400">
-          {approvalCount}/{threshold} approvals
-        </p>
       </div>
 
-      <div className="flex-1">
-        <p className="text-white font-semibold mt-1">
-          {formatXlm(amount)} XLM → {formatAddress(to, { startChars: 6, endChars: 4 })}
-        </p>
-        {memo && <p className="text-gray-400 text-sm mt-0.5">{memo}</p>}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        {approvals.length === 0 ? (
-          <span className="text-xs text-gray-500">No approvals yet</span>
-        ) : (
-          approvals.map((approver) => (
-            <div
-              key={`${txId}-${approver}`}
-              className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 py-1 pr-2 pl-1"
+      <div className="space-y-3 mb-6">
+        <div className="flex justify-between text-sm">
+          <span className="text-gray-400">Recipient</span>
+          <span className="text-gray-200 font-mono">{formatAddress(to)}</span>
+        </div>
+        <div className="flex justify-between text-sm">
+          <span className="text-gray-400">Amount</span>
+          <span className="text-white font-bold">{formatXlm(amount)} XLM</span>
+        </div>
+        {memo && (
+          <div className="flex justify-between items-start gap-4 text-sm">
+            <span className="text-gray-400 shrink-0">Memo</span>
+            {/* Clamp long memos to 2 lines; show full text on hover via title.
+                `break-words` prevents a single long token from bursting the layout. */}
+            <span
+              className="text-gray-300 italic text-right max-w-[60%] line-clamp-2 break-words"
+              title={memo}
             >
-              <span
-                aria-hidden="true"
-                className="h-5 w-5 rounded-full bg-primary-500/25 text-[10px] font-semibold text-primary-300 flex items-center justify-center"
-              >
-                {approver.slice(1, 2).toUpperCase()}
-              </span>
-              <span className="text-xs text-gray-300">
-                {formatAddress(approver, { startChars: 4, endChars: 3 })}
-              </span>
-            </div>
-          ))
+              {memo}
+            </span>
+          </div>
         )}
       </div>
 
-      {!executed && (
-        <div className="flex flex-wrap gap-2 justify-end">
-          <button
-            className={`btn-primary text-xs py-1 px-3 ${
-              isPendingApproval ? "opacity-50 cursor-not-allowed" : ""
-            }`}
-            disabled={isPendingApproval || !onApprove}
-            onClick={handleApprove}
-          >
-            {isPendingApproval ? "Approving..." : "Approve"}
-          </button>
-          <button
-            className={`btn-secondary text-xs py-1 px-3 ${
-              !canExecute ? "opacity-50 cursor-not-allowed" : ""
-            }`}
-            disabled={!canExecute}
-            onClick={handleExecute}
-          >
-            {isPendingExecution ? "Executing..." : "Execute"}
-          </button>
+      <div className="pt-4 border-t border-stellar-border flex items-center justify-between">
+        {/* role="status" + aria-live announces approval count changes to screen readers */}
+        <div
+          role="status"
+          aria-live="polite"
+          aria-label={`${approvals.length} of ${threshold} approvals required${isReadyToExecute ? ", threshold met" : ""}`}
+          className="flex flex-col gap-1"
+        >
+          <span className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
+            Approvals
+          </span>
+          <div className="flex items-center gap-1.5">
+            <div
+              aria-hidden="true"
+              className="h-1.5 w-24 bg-gray-800 rounded-full overflow-hidden"
+            >
+              <div
+                className={`h-full transition-all duration-500 ${isReadyToExecute ? "bg-green-500" : "bg-primary-500"
+                  }`}
+                style={{
+                  width: `${Math.min(100, (approvals.length / threshold) * 100)}%`,
+                }}
+              />
+            </div>
+            <span aria-hidden="true" className="text-xs font-medium text-gray-300">
+              {approvals.length} / {threshold}
+            </span>
+          </div>
+          {/* Explicit approval progress text for mobile/small screens */}
+          <p className="text-xs text-gray-400 mt-0.5">
+            {isReadyToExecute
+              ? "Ready to execute"
+              : `${threshold - approvals.length} approval${threshold - approvals.length === 1 ? "" : "s"} needed`}
+          </p>
         </div>
-      )}
-      {executed && (
-        <p className="text-xs text-green-400 text-right">
-          Executed on-chain
-        </p>
-      )}
-      {approvalCount < threshold && !executed && (
-        <p className="text-xs text-gray-500 text-right">
-          Needs {threshold - approvalCount} more approval
-          {threshold - approvalCount === 1 ? "" : "s"}.
-        </p>
-      )}
-      {approvalCount >= threshold && !executed && (
-        <p className="text-xs text-green-400 text-right">
-          Threshold met. Ready to execute.
-        </p>
-      )}
-      <div className="text-right">
-        <CopyButton value={to} label={`transaction ${txId} destination address`} />
+
+        <div className="flex gap-2 items-center">
+          {!executed && (
+            <>
+              {isReadyToExecute ? (
+                <>
+                  {executeDisabledReason && (
+                    <span id={executeDescId} className="sr-only">
+                      {executeDisabledReason}
+                    </span>
+                  )}
+                  <button
+                    aria-label={`Execute transaction #${txId}`}
+                    aria-describedby={executeDisabledReason ? executeDescId : undefined}
+                    className="btn-primary py-1.5 px-4 text-xs focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onExecute?.(txId);
+                    }}
+                    disabled={!canSign || isPendingExecution}
+                  >
+                    {isPendingExecution ? "Executing..." : "Execute"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  {approveDisabledReason && (
+                    <span id={approveDescId} className="sr-only">
+                      {approveDisabledReason}
+                    </span>
+                  )}
+                  <button
+                    aria-label={
+                      hasApproved
+                        ? `Already approved transaction #${txId}`
+                        : `Approve transaction #${txId}`
+                    }
+                    aria-describedby={approveDisabledReason ? approveDescId : undefined}
+                    className={`py-1.5 px-4 text-xs rounded-lg font-medium transition-all focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900 ${hasApproved || !canSign
+                        ? "bg-gray-800 text-gray-500 cursor-not-allowed"
+                        : "bg-white/10 text-white hover:bg-white/20 border border-white/10"
+                      }`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!hasApproved && canSign) onApprove?.(txId);
+                    }}
+                    disabled={hasApproved || !canSign || isPendingApproval}
+                  >
+                    {isPendingApproval
+                      ? "Approving..."
+                      : hasApproved
+                        ? "Approved"
+                        : "Approve"}
+                  </button>
+                </>
+              )}
+            </>
+          )}
+          {!canSign && !executed && (
+            <span className="text-[10px] text-gray-500 italic">
+              No signing permission
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
-}
+};

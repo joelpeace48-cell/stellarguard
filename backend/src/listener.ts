@@ -10,8 +10,10 @@ import { parseRawEvent, ParsedEvent } from "./parser";
 
 const MAX_BACKOFF_MS = 30_000;
 const BASE_BACKOFF_MS = 1_000;
+const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 let running = true;
+let shutdownForced = false;
 
 /**
  * Convert a ParsedEvent to a StoredEvent for database insertion.
@@ -21,6 +23,8 @@ function toStoredEvent(parsed: ParsedEvent): StoredEvent {
     contract_id: parsed.contractId,
     topic_1: parsed.topic1,
     topic_2: parsed.topic2,
+    event_name: parsed.eventName,
+    event_topics: parsed.eventTopics,
     event_data: parsed.data,
     ledger: parsed.ledger,
     timestamp: parsed.timestamp,
@@ -46,6 +50,13 @@ function buildFilters(
  */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Clamp a value between min and max (inclusive).
+ */
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 /**
@@ -108,7 +119,7 @@ async function pollEvents(
   }
 
   for (const parsed of parsedEvents) {
-    const eventName = parsed.data._eventName || `${parsed.topic1}:${parsed.topic2}`;
+    const eventName = parsed.eventName || `${parsed.topic1}:${parsed.topic2}`;
     console.log(
       `[Ledger ${parsed.ledger}] ${eventName} from ${parsed.contractId}`
     );
@@ -118,11 +129,52 @@ async function pollEvents(
 }
 
 /**
+ * Compute the next adaptive poll interval.
+ *
+ * When events were found in the last poll the interval resets to the configured
+ * minimum so the listener stays responsive during bursts of activity.
+ *
+ * When no events are found the interval grows by `backoffFactor` up to
+ * `maxIntervalMs` to avoid burning RPC budget during idle periods.
+ *
+ * @param currentIntervalMs  The interval used for the poll that just completed.
+ * @param eventsFound        Whether at least one event was returned.
+ * @param minIntervalMs      Lower bound (active / fast polling).
+ * @param maxIntervalMs      Upper bound (idle / slow polling).
+ * @param backoffFactor      Multiplicative step applied on an empty poll.
+ * @returns Next interval in milliseconds.
+ */
+export function computeNextInterval(
+  currentIntervalMs: number,
+  eventsFound: boolean,
+  minIntervalMs: number,
+  maxIntervalMs: number,
+  backoffFactor: number
+): number {
+  if (eventsFound) {
+    // Reset to fast polling immediately when activity is detected.
+    return minIntervalMs;
+  }
+
+  // Grow interval exponentially, capped at the maximum.
+  const next = currentIntervalMs * backoffFactor;
+  return clamp(Math.round(next), minIntervalMs, maxIntervalMs);
+}
+
+/**
  * Main event listener loop.
  * Polls the Soroban RPC for contract events and stores them in the database.
+ * Uses adaptive polling: the interval shrinks when events are found and grows
+ * when the chain is idle, avoiding wasted RPC calls.
  */
 export async function startListener(): Promise<void> {
-  const { sorobanRpcUrl, contractIds, pollIntervalMs } = config;
+  const {
+    sorobanRpcUrl,
+    contractIds,
+    minPollIntervalMs,
+    maxPollIntervalMs,
+    pollBackoffFactor,
+  } = config;
 
   if (contractIds.length === 0) {
     console.error(
@@ -134,6 +186,9 @@ export async function startListener(): Promise<void> {
   const server = new SorobanRpc.Server(sorobanRpcUrl);
   console.log(`Connecting to Soroban RPC at ${sorobanRpcUrl}`);
   console.log(`Watching ${contractIds.length} contract(s)`);
+  console.log(
+    `Adaptive polling: min=${minPollIntervalMs}ms  max=${maxPollIntervalMs}ms  backoff=${pollBackoffFactor}x`
+  );
 
   // Load last cursor from DB
   let { cursor: lastCursor, lastLedger } = await getLastCursor();
@@ -145,6 +200,8 @@ export async function startListener(): Promise<void> {
   }
 
   let consecutiveErrors = 0;
+  // Start at the minimum interval so we catch early events quickly.
+  let currentPollIntervalMs = minPollIntervalMs;
 
   while (running) {
     try {
@@ -156,10 +213,27 @@ export async function startListener(): Promise<void> {
         lastLedger = result.newLedger;
       }
 
-      // Reset backoff on success
+      // Reset error backoff on success.
       consecutiveErrors = 0;
 
-      await sleep(pollIntervalMs);
+      // Compute next adaptive poll interval and log when it changes.
+      const nextInterval = computeNextInterval(
+        currentPollIntervalMs,
+        result.eventsProcessed > 0,
+        minPollIntervalMs,
+        maxPollIntervalMs,
+        pollBackoffFactor
+      );
+
+      if (nextInterval !== currentPollIntervalMs) {
+        const direction = nextInterval > currentPollIntervalMs ? "backing off" : "resuming fast poll";
+        console.log(
+          `[adaptive-poll] ${direction}: ${currentPollIntervalMs}ms → ${nextInterval}ms`
+        );
+        currentPollIntervalMs = nextInterval;
+      }
+
+      await sleep(currentPollIntervalMs);
     } catch (err) {
       consecutiveErrors++;
       const backoffMs = Math.min(
@@ -184,4 +258,43 @@ export async function startListener(): Promise<void> {
  */
 export function stopListener(): void {
   running = false;
+}
+
+/**
+ * Wait for in-flight events to complete, then resolve.
+ */
+export async function waitForCompletion(): Promise<void> {
+  return new Promise((resolve) => {
+    const checkInterval = setInterval(() => {
+      if (!running || shutdownForced) {
+        clearInterval(checkInterval);
+        resolve();
+      }
+    }, 100);
+
+    setTimeout(() => {
+      clearInterval(checkInterval);
+      shutdownForced = true;
+      resolve();
+    }, GRACEFUL_SHUTDOWN_TIMEOUT_MS);
+  });
+}
+
+/**
+ * Handle process signals for graceful shutdown.
+ */
+export function setupSignalHandlers(): void {
+  process.on("SIGTERM", async () => {
+    console.log("Received SIGTERM, shutting down gracefully...");
+    stopListener();
+    await waitForCompletion();
+    process.exit(0);
+  });
+
+  process.on("SIGINT", async () => {
+    console.log("Received SIGINT, shutting down gracefully...");
+    stopListener();
+    await waitForCompletion();
+    process.exit(0);
+  });
 }

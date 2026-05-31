@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, log, symbol_short, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, log, symbol_short, Address, Env, String,
     Vec,
 };
 
@@ -42,6 +42,8 @@ pub enum Error {
     Overflow = 13,
     /// Storage operation failed.
     StorageError = 14,
+    /// Attempted to add an address that is already a member.
+    MemberAlreadyExists = 15,
 }
 
 // ============================================================================
@@ -109,9 +111,9 @@ pub struct Proposal {
     /// Unique identifier.
     pub id: u64,
     /// Title of the proposal.
-    pub title: Symbol,
+    pub title: String,
     /// Short description.
-    pub description: Symbol,
+    pub description: String,
     /// The type of action being proposed.
     pub action: ProposalAction,
     /// Address of the proposer.
@@ -225,8 +227,8 @@ impl GovernanceContract {
     pub fn create_proposal(
         env: Env,
         proposer: Address,
-        title: Symbol,
-        description: Symbol,
+        title: String,
+        description: String,
         action: ProposalAction,
         amount: i128,
         target: Address,
@@ -237,10 +239,10 @@ impl GovernanceContract {
         proposer.require_auth();
 
         // Validation checks
-        if title == Symbol::new(&env, "") {
+        if title == String::from_str(&env, "") {
             return Err(Error::InvalidProposal);
         }
-        if description == Symbol::new(&env, "") {
+        if description == String::from_str(&env, "") {
             return Err(Error::InvalidProposal);
         }
         if amount < 0 {
@@ -348,11 +350,14 @@ impl GovernanceContract {
 
         // Record vote
         if vote_for {
-            proposal.votes_for += 1;
+            proposal.votes_for = proposal.votes_for.checked_add(1).ok_or(Error::Overflow)?;
         } else {
-            proposal.votes_against += 1;
+            proposal.votes_against = proposal
+                .votes_against
+                .checked_add(1)
+                .ok_or(Error::Overflow)?;
         }
-        proposal.total_votes += 1;
+        proposal.total_votes = proposal.total_votes.checked_add(1).ok_or(Error::Overflow)?;
 
         // Save vote record (prevents double voting)
         env.storage().persistent().set(&vote_key, &vote_for);
@@ -516,7 +521,7 @@ impl GovernanceContract {
         // Check not already a member
         for i in 0..members.len() {
             if members.get(i).unwrap() == *member {
-                return Ok(()); // Already a member, no-op
+                return Err(Error::MemberAlreadyExists);
             }
         }
 
@@ -605,6 +610,33 @@ impl GovernanceContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Return a slice of members starting at `start`, up to `limit` entries.
+    pub fn get_members_paginated(env: Env, start: u32, limit: u32) -> Vec<Address> {
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .unwrap_or(Vec::new(&env));
+
+        let mut page = Vec::new(&env);
+        if limit == 0 {
+            return page;
+        }
+
+        let total = members.len();
+        let mut index = start;
+        while index < total && page.len() < limit {
+            page.push_back(members.get(index).unwrap());
+            index += 1;
+        }
+        page
+    }
+
+    /// Return the current number of DAO members.
+    pub fn get_member_count(env: Env) -> u32 {
+        Self::get_members(env).len()
+    }
+
     /// Check if an address has voted on a proposal.
     pub fn has_voted(env: Env, proposal_id: u64, voter: Address) -> bool {
         env.storage()
@@ -659,6 +691,11 @@ impl GovernanceContract {
         }
 
         admin.require_auth();
+
+        // Validate quorum range (1-100)
+        if new_quorum < 1 || new_quorum > 100 {
+            return Err(Error::InvalidProposal);
+        }
 
         env.storage()
             .instance()
@@ -730,7 +767,7 @@ mod test {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Events as _;
     use soroban_sdk::testutils::Ledger as _;
-    use soroban_sdk::{vec, Env, IntoVal, TryFromVal, Val};
+    use soroban_sdk::{vec, BytesN, Env, IntoVal, TryFromVal, Val};
 
     fn setup_contract() -> (Env, Address, GovernanceContractClient<'static>) {
         let env = Env::default();
@@ -739,6 +776,14 @@ mod test {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         (env, admin, client)
+    }
+
+    fn text(env: &Env, value: &str) -> String {
+        String::from_str(env, value)
+    }
+
+    fn wasm_hash(env: &Env) -> BytesN<32> {
+        BytesN::from_array(env, &[0; 32])
     }
 
     #[test]
@@ -772,8 +817,8 @@ mod test {
         // Create a funding proposal
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("fund_dev"),
-            &symbol_short!("dev_work"),
+            &text(&env, "Fund development sprint"),
+            &text(&env, "Allocate budget for the next engineering sprint"),
             &ProposalAction::Funding,
             &500_000,
             &member1,
@@ -802,8 +847,8 @@ mod test {
         // Create a funding proposal
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("fund_dev"),
-            &symbol_short!("dev_work"),
+            &text(&env, "Fund development sprint"),
+            &text(&env, "Allocate budget for the next engineering sprint"),
             &ProposalAction::Funding,
             &500_000,
             &member1,
@@ -813,8 +858,11 @@ mod test {
         let proposal = client.get_proposal(&proposal_id);
         assert_eq!(proposal.id, 1);
         assert_eq!(proposal.proposer, member1);
-        assert_eq!(proposal.title, symbol_short!("fund_dev"));
-        assert_eq!(proposal.description, symbol_short!("dev_work"));
+        assert_eq!(proposal.title, text(&env, "Fund development sprint"));
+        assert_eq!(
+            proposal.description,
+            text(&env, "Allocate budget for the next engineering sprint")
+        );
         assert_eq!(proposal.action, ProposalAction::Funding);
         assert_eq!(proposal.amount, 500_000);
         assert_eq!(proposal.target, member1);
@@ -840,8 +888,8 @@ mod test {
 
         let result = client.try_create_proposal(
             &non_member,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &non_member,
@@ -860,8 +908,8 @@ mod test {
 
         let result = client.try_create_proposal(
             &member1,
-            &symbol_short!(""), // Empty title
-            &symbol_short!("test"),
+            &text(&env, ""), // Empty title
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -880,8 +928,8 @@ mod test {
 
         let result = client.try_create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!(""), // Empty description
+            &text(&env, "test"),
+            &text(&env, ""), // Empty description
             &ProposalAction::General,
             &0,
             &member1,
@@ -900,8 +948,8 @@ mod test {
 
         let result = client.try_create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::Funding,
             &-100, // Negative amount
             &member1,
@@ -921,24 +969,24 @@ mod test {
         // Create multiple proposals
         let proposal_id1 = client.create_proposal(
             &member1,
-            &symbol_short!("test1"),
-            &symbol_short!("test1"),
+            &text(&env, "test1"),
+            &text(&env, "test1"),
             &ProposalAction::General,
             &0,
             &member1,
         );
         let proposal_id2 = client.create_proposal(
             &member1,
-            &symbol_short!("test2"),
-            &symbol_short!("test2"),
+            &text(&env, "test2"),
+            &text(&env, "test2"),
             &ProposalAction::General,
             &0,
             &member1,
         );
         let proposal_id3 = client.create_proposal(
             &member1,
-            &symbol_short!("test3"),
-            &symbol_short!("test3"),
+            &text(&env, "test3"),
+            &text(&env, "test3"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -965,8 +1013,8 @@ mod test {
         // Create proposal and check event
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("fund_dev"),
-            &symbol_short!("dev_work"),
+            &text(&env, "Fund development sprint"),
+            &text(&env, "Allocate budget for the next engineering sprint"),
             &ProposalAction::Funding,
             &500_000,
             &member1,
@@ -1009,8 +1057,8 @@ mod test {
         // Create proposal
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -1034,8 +1082,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -1061,8 +1109,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("add_mem"),
-            &symbol_short!("new_mem"),
+            &text(&env, "add_mem"),
+            &text(&env, "new_mem"),
             &ProposalAction::AddMember,
             &0,
             &new_member,
@@ -1098,8 +1146,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("rem_mem"),
-            &symbol_short!("rem"),
+            &text(&env, "rem_mem"),
+            &text(&env, "rem"),
             &ProposalAction::RemoveMember,
             &0,
             &member3,
@@ -1133,8 +1181,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -1163,8 +1211,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -1194,8 +1242,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -1221,8 +1269,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -1247,8 +1295,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -1274,8 +1322,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("policy"),
-            &symbol_short!("update"),
+            &text(&env, "policy"),
+            &text(&env, "update"),
             &ProposalAction::PolicyChange,
             &0,
             &member1,
@@ -1321,8 +1369,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("active"),
-            &symbol_short!("wait"),
+            &text(&env, "active"),
+            &text(&env, "wait"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -1353,8 +1401,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("add_mem"),
-            &symbol_short!("expand"),
+            &text(&env, "add_mem"),
+            &text(&env, "expand DAO membership beyond symbol limits"),
             &ProposalAction::AddMember,
             &0,
             &new_member,
@@ -1446,8 +1494,8 @@ mod test {
 
         let proposal_id = client.create_proposal(
             &member1,
-            &symbol_short!("test"),
-            &symbol_short!("test"),
+            &text(&env, "test"),
+            &text(&env, "test"),
             &ProposalAction::General,
             &0,
             &member1,
@@ -1457,6 +1505,39 @@ mod test {
 
         let result = client.try_vote(&member1, &proposal_id, &true);
         assert_eq!(result, Err(Ok(Error::VotingClosed)));
+    }
+
+    #[test]
+    fn test_vote_counter_overflow_returns_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let members = Vec::from_array(&env, [member1.clone(), member2.clone()]);
+        client.initialize(&admin, &members, &50, &10);
+
+        let proposal_id = client.create_proposal(
+            &member1,
+            &text(&env, "Overflow"),
+            &text(&env, "Force vote counter overflow"),
+            &ProposalAction::General,
+            &0,
+            &member1,
+        );
+
+        let mut proposal = client.get_proposal(&proposal_id);
+        proposal.total_votes = u32::MAX;
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Proposal(proposal_id), &proposal);
+        });
+
+        let result = client.try_vote(&member2, &proposal_id, &true);
+        assert_eq!(result, Err(Ok(Error::Overflow)));
     }
 
     #[test]
@@ -1477,5 +1558,207 @@ mod test {
 
         client.set_quorum(&admin, &75);
         assert_eq!(client.get_config().quorum_percent, 75);
+    }
+
+    #[test]
+    fn test_set_quorum_rejects_zero() {
+        let (env, admin, client) = setup_contract();
+        client.initialize(&admin, &Vec::new(&env), &50, &10);
+
+        let result = client.try_set_quorum(&admin, &0);
+        assert_eq!(result, Err(Ok(Error::InvalidProposal)));
+    }
+
+    #[test]
+    fn test_set_quorum_rejects_above_100() {
+        let (env, admin, client) = setup_contract();
+        client.initialize(&admin, &Vec::new(&env), &50, &10);
+
+        let result = client.try_set_quorum(&admin, &101);
+        assert_eq!(result, Err(Ok(Error::InvalidProposal)));
+    }
+
+    #[test]
+    fn test_set_quorum_accepts_boundary_values() {
+        let (env, admin, client) = setup_contract();
+        client.initialize(&admin, &Vec::new(&env), &50, &10);
+
+        // Test minimum valid value
+        client.set_quorum(&admin, &1);
+        assert_eq!(client.get_config().quorum_percent, 1);
+
+        // Test maximum valid value
+        client.set_quorum(&admin, &100);
+        assert_eq!(client.get_config().quorum_percent, 100);
+    }
+
+    #[test]
+    fn test_execute_add_member_proposal_fails_for_existing_member() {
+        let (env, admin, client) = setup_contract();
+
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let members = Vec::from_array(&env, [member1.clone(), member2.clone()]);
+        client.initialize(&admin, &members, &50, &10);
+
+        let proposal_id = client.create_proposal(
+            &member1,
+            &text(&env, "dup_mem"),
+            &text(&env, "try_add_existing"),
+            &ProposalAction::AddMember,
+            &0,
+            &member2,
+        );
+
+        client.vote(&member1, &proposal_id, &true);
+        client.vote(&member2, &proposal_id, &true);
+        env.ledger().set_sequence_number(100);
+        let status = client.finalize(&member1, &proposal_id);
+        assert_eq!(status, ProposalStatus::Passed);
+
+        let result = client.try_execute_proposal(&admin, &proposal_id);
+        assert_eq!(result, Err(Ok(Error::MemberAlreadyExists)));
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.status, ProposalStatus::Passed);
+
+        let all_members = client.get_members();
+        assert_eq!(all_members.len(), 2);
+    }
+
+    // =========================================================================
+    // Negative Path Tests (TEST-3)
+    // =========================================================================
+
+    #[test]
+    fn test_double_finalize_returns_voting_closed() {
+        let (env, admin, client) = setup_contract();
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let members = Vec::from_array(&env, [member1.clone(), member2.clone()]);
+        client.initialize(&admin, &members, &50, &10);
+
+        let proposal_id = client.create_proposal(
+            &member1,
+            &text(&env, "test"),
+            &text(&env, "test"),
+            &ProposalAction::General,
+            &0,
+            &member1,
+        );
+
+        client.vote(&member1, &proposal_id, &true);
+        client.vote(&member2, &proposal_id, &true);
+        env.ledger().set_sequence_number(100);
+
+        // First finalize should succeed
+        let status = client.finalize(&member1, &proposal_id);
+        assert_eq!(status, ProposalStatus::Passed);
+
+        // Second finalize should fail
+        let result = client.try_finalize(&member1, &proposal_id);
+        assert_eq!(result, Err(Ok(Error::VotingClosed)));
+    }
+
+    #[test]
+    fn test_upgrade_rejects_non_admin() {
+        let (env, admin, client) = setup_contract();
+        client.initialize(&admin, &Vec::new(&env), &50, &10);
+
+        let outsider = Address::generate(&env);
+        let wasm_hash = wasm_hash(&env);
+        let result = client.try_upgrade(&outsider, &wasm_hash);
+        assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    }
+
+    #[test]
+    fn test_get_members_paginated_two_pages() {
+        let (env, admin, client) = setup_contract();
+
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let member3 = Address::generate(&env);
+        let member4 = Address::generate(&env);
+        let member5 = Address::generate(&env);
+        let members = Vec::from_array(
+            &env,
+            [
+                member1.clone(),
+                member2.clone(),
+                member3.clone(),
+                member4.clone(),
+                member5.clone(),
+            ],
+        );
+
+        client.initialize(&admin, &members, &50, &10);
+
+        let page1 = client.get_members_paginated(&0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), member1);
+        assert_eq!(page1.get(1).unwrap(), member2);
+
+        let page2 = client.get_members_paginated(&2, &2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2.get(0).unwrap(), member3);
+        assert_eq!(page2.get(1).unwrap(), member4);
+
+        let page3 = client.get_members_paginated(&4, &2);
+        assert_eq!(page3.len(), 1);
+        assert_eq!(page3.get(0).unwrap(), member5);
+    }
+
+    #[test]
+    fn test_get_members_paginated_empty_and_beyond_end() {
+        let (env, admin, client) = setup_contract();
+
+        let member1 = Address::generate(&env);
+        let members = Vec::from_array(&env, [member1.clone()]);
+        client.initialize(&admin, &members, &50, &10);
+
+        assert_eq!(client.get_members_paginated(&0, &0).len(), 0);
+        assert_eq!(client.get_members_paginated(&10, &5).len(), 0);
+    }
+
+    #[test]
+    fn test_get_member_count_tracks_member_changes() {
+        let (env, admin, client) = setup_contract();
+
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let members = Vec::from_array(&env, [member1.clone(), member2.clone()]);
+        client.initialize(&admin, &members, &50, &10);
+        assert_eq!(client.get_member_count(), 2);
+
+        let new_member = Address::generate(&env);
+        let add_id = client.create_proposal(
+            &member1,
+            &text(&env, "add"),
+            &text(&env, "add member"),
+            &ProposalAction::AddMember,
+            &0,
+            &new_member,
+        );
+        client.vote(&member1, &add_id, &true);
+        client.vote(&member2, &add_id, &true);
+        env.ledger().set_sequence_number(100);
+        client.finalize(&member1, &add_id);
+        client.execute_proposal(&admin, &add_id);
+        assert_eq!(client.get_member_count(), 3);
+
+        let remove_id = client.create_proposal(
+            &member1,
+            &text(&env, "remove"),
+            &text(&env, "remove member"),
+            &ProposalAction::RemoveMember,
+            &0,
+            &new_member,
+        );
+        client.vote(&member1, &remove_id, &true);
+        client.vote(&member2, &remove_id, &true);
+        env.ledger().set_sequence_number(200);
+        client.finalize(&member1, &remove_id);
+        client.execute_proposal(&admin, &remove_id);
+        assert_eq!(client.get_member_count(), 2);
     }
 }

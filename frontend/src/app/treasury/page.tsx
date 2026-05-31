@@ -1,15 +1,29 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { useTreasury } from "@/hooks/useTreasury";
 import { useFreighter } from "@/hooks/useFreighter";
 import { formatAbsoluteDate, formatAddress, formatXlm } from "@/lib/formatters";
 import { ERROR_CODE_LABELS } from "@/lib/errors";
-import { TreasuryCard } from "@/components/TreasuryCard";
 import { WalletConnect } from "@/components/WalletConnect";
-import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { CopyButton } from "@/components/CopyButton";
 import type { TreasuryTransaction } from "@/lib/contractData";
+import { TreasuryFilters } from "@/components/treasury/TreasuryFilters";
+
+const TreasuryCard = dynamic(() =>
+  import("@/components/TreasuryCard").then((module) => module.TreasuryCard),
+);
+const WithdrawalModal = dynamic(() =>
+  import("@/components/WithdrawalModal").then(
+    (module) => module.WithdrawalModal,
+  ),
+);
+const ConfirmationDialog = dynamic(() =>
+  import("@/components/ConfirmationDialog").then(
+    (module) => module.ConfirmationDialog,
+  ),
+);
 
 export default function TreasuryPage() {
   const { address } = useFreighter();
@@ -21,27 +35,82 @@ export default function TreasuryPage() {
     error,
     isNetworkMismatch,
     pendingActions,
+    isProposing,
+    proposeWithdrawal,
     approve,
     execute,
     refresh,
     clearError,
   } = useTreasury();
 
-  const [selectedTx, setSelectedTx] = useState<TreasuryTransaction | null>(null);
-  const [confirmExecuteTxId, setConfirmExecuteTxId] = useState<number | null>(null);
+  const [selectedTx, setSelectedTx] = useState<TreasuryTransaction | null>(
+    null,
+  );
+  const [confirmExecuteTxId, setConfirmExecuteTxId] = useState<number | null>(
+    null,
+  );
+  const [showWithdrawalModal, setShowWithdrawalModal] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<
+    "pending" | "ready" | "executed"
+  >("pending");
+  const threshold = config?.threshold ?? 0;
+  const signerCount = config?.signerCount ?? 0;
+
+  // Escape key handler for transaction details drawer
+  useEffect(() => {
+    if (!selectedTx) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedTx(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedTx]);
 
   const pendingTxs = useMemo(
     () => transactions.filter((transaction) => !transaction.executed),
     [transactions],
   );
 
-  const historyTxs = useMemo(
-    () => transactions.filter((transaction) => transaction.executed),
-    [transactions],
-  );
+  const filteredTransactions = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return transactions.filter((transaction) => {
+      let statusMatches = false;
+      if (statusFilter === "executed") {
+        statusMatches = transaction.executed;
+      } else if (statusFilter === "ready") {
+        statusMatches =
+          !transaction.executed && transaction.approvals.length >= threshold;
+      } else if (statusFilter === "pending") {
+        statusMatches =
+          !transaction.executed && transaction.approvals.length < threshold;
+      }
+      if (!statusMatches) {
+        return false;
+      }
+      if (!q) {
+        return true;
+      }
+      return (
+        transaction.id.toString().includes(q) ||
+        transaction.to.toLowerCase().includes(q) ||
+        transaction.approvals.some((approver) =>
+          approver.toLowerCase().includes(q),
+        )
+      );
+    });
+  }, [transactions, searchQuery, statusFilter, threshold]);
 
-  const threshold = config?.threshold ?? 0;
-  const signerCount = config?.signerCount ?? 0;
+  const filteredHistoryTxs = useMemo(
+    () => filteredTransactions.filter((transaction) => transaction.executed),
+    [filteredTransactions],
+  );
 
   const handleApprove = async (txId: number) => {
     await approve(txId);
@@ -51,6 +120,14 @@ export default function TreasuryPage() {
     setConfirmExecuteTxId(txId);
   };
 
+  const handleProposeWithdrawal = async (
+    to: string,
+    amount: bigint,
+    memo: string,
+  ) => {
+    await proposeWithdrawal(to, amount, memo);
+  };
+
   const runExecute = async () => {
     if (confirmExecuteTxId === null) {
       return;
@@ -58,6 +135,39 @@ export default function TreasuryPage() {
 
     await execute(confirmExecuteTxId);
     setConfirmExecuteTxId(null);
+  };
+
+  const exportHistoryCsv = () => {
+    const rows = [
+      [
+        "id",
+        "destination",
+        "amount_xlm",
+        "status",
+        "approvals",
+        "created_at_unix",
+      ],
+      ...filteredHistoryTxs.map((transaction) => [
+        String(transaction.id),
+        transaction.to,
+        formatXlm(transaction.amount),
+        "Executed",
+        transaction.approvals.join("|"),
+        String(transaction.createdAt),
+      ]),
+    ];
+    const csv = rows
+      .map((row) =>
+        row.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(","),
+      )
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `treasury-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -70,15 +180,39 @@ export default function TreasuryPage() {
           </p>
         </div>
         <div className="flex gap-2 items-center">
+          <button
+            className="btn-primary text-sm"
+            onClick={() => setShowWithdrawalModal(true)}
+            disabled={isNetworkMismatch || !address || isProposing || isLoading || (error?.recoverable ?? false)}
+          >
+            {isProposing ? "Proposing..." : "+ Propose Withdrawal"}
+          </button>
+          <button
+            className="btn-secondary text-sm"
+            onClick={exportHistoryCsv}
+            disabled={filteredHistoryTxs.length === 0}
+          >
+            Export CSV
+          </button>
           <button className="btn-secondary text-sm" onClick={() => refresh()}>
             {isLoading ? "Refreshing..." : "Refresh"}
           </button>
         </div>
       </div>
 
+      <TreasuryFilters
+        query={searchQuery}
+        status={statusFilter}
+        resultCount={filteredTransactions.length}
+        onQueryChange={setSearchQuery}
+        onStatusChange={setStatusFilter}
+      />
+
       {isNetworkMismatch && (
         <div className="card border-red-500/40 bg-red-950/20">
-          <h2 className="text-sm font-semibold text-red-300">Network mismatch</h2>
+          <h2 className="text-sm font-semibold text-red-300">
+            Network mismatch
+          </h2>
           <p className="text-sm text-red-200 mt-1">
             Your wallet is on a different network than the configured contracts.
             Switch networks in Freighter, then retry.
@@ -88,7 +222,9 @@ export default function TreasuryPage() {
 
       {!address && (
         <div className="card border-yellow-500/40 bg-yellow-950/20">
-          <h2 className="text-sm font-semibold text-yellow-300">Wallet disconnected</h2>
+          <h2 className="text-sm font-semibold text-yellow-300">
+            Wallet disconnected
+          </h2>
           <p className="text-sm text-yellow-200 mt-1">
             Connect your wallet to approve or execute treasury transactions.
           </p>
@@ -122,7 +258,9 @@ export default function TreasuryPage() {
           <div>
             <p className="text-sm text-gray-400">Treasury Balance</p>
             <p className="text-3xl font-bold text-white mt-1">
-              {isLoading && balance === 0n ? "Loading..." : `${formatXlm(balance)} XLM`}
+              {isLoading && balance === BigInt(0)
+                ? "Loading..."
+                : `${formatXlm(balance)} XLM`}
             </p>
           </div>
           <div>
@@ -135,10 +273,15 @@ export default function TreasuryPage() {
             <p className="text-sm text-gray-400">Admin</p>
             <div className="flex items-center gap-2 mt-1">
               <p className="text-sm text-gray-200 font-mono">
-                {config?.admin ? formatAddress(config.admin, { startChars: 6, endChars: 4 }) : "-"}
+                {config?.admin
+                  ? formatAddress(config.admin, { startChars: 6, endChars: 4 })
+                  : "-"}
               </p>
               {config?.admin && (
-                <CopyButton value={config.admin} label="treasury admin address" />
+                <CopyButton
+                  value={config.admin}
+                  label="treasury admin address"
+                />
               )}
             </div>
           </div>
@@ -146,76 +289,77 @@ export default function TreasuryPage() {
       </div>
 
       <div>
-        <h2 className="text-xl font-semibold text-white mb-4">Pending Transactions</h2>
+        <h2 className="text-xl font-semibold text-white mb-4">
+          Pending Transactions
+        </h2>
         <div className="space-y-4">
-          {pendingTxs.length === 0 ? (
-            <div className="card">
-              <p className="text-gray-500 text-center py-8">
-                {isLoading ? "Loading transactions..." : "No pending transactions."}
+          {pendingTxs.filter((transaction) =>
+            filteredTransactions.some((item) => item.id === transaction.id),
+          ).length === 0 ? (
+            <div className="card text-center py-8">
+              <p className="text-gray-500 mb-4">
+                {isLoading
+                  ? "Loading transactions..."
+                  : transactions.length === 0
+                    ? "No treasury transactions yet."
+                    : "No transactions match your current filters."}
               </p>
+              {!isLoading && transactions.length > 0 && (
+                <button
+                  onClick={() => {
+                    setSearchQuery("");
+                    setStatusFilter("pending");
+                  }}
+                  className="btn-secondary text-sm"
+                >
+                  Reset Filters
+                </button>
+              )}
             </div>
           ) : (
-            pendingTxs.map((transaction) => (
-              <div
-                key={transaction.id}
-                className="cursor-pointer"
-                onClick={() => setSelectedTx(transaction)}
-              >
-                <TreasuryCard
-                  txId={transaction.id}
-                  to={transaction.to}
-                  amount={transaction.amount}
-                  memo={transaction.memo}
-                  approvals={transaction.approvals}
-                  threshold={threshold || 1}
-                  executed={transaction.executed}
-                  isPendingApproval={pendingActions.get(transaction.id) === "approve"}
-                  isPendingExecution={pendingActions.get(transaction.id) === "execute"}
-                  onApprove={isNetworkMismatch || !address ? undefined : handleApprove}
-                  onExecute={isNetworkMismatch || !address ? undefined : handleExecute}
-                />
-              </div>
-            ))
+            pendingTxs
+              .filter((transaction) =>
+                filteredTransactions.some((item) => item.id === transaction.id),
+              )
+              .map((transaction) => (
+                <div
+                  key={transaction.id}
+                  className="cursor-pointer"
+                  onClick={() => setSelectedTx(transaction)}
+                >
+                  <TreasuryCard
+                    txId={transaction.id}
+                    to={transaction.to}
+                    amount={transaction.amount}
+                    memo={transaction.memo}
+                    approvals={transaction.approvals}
+                    threshold={threshold || 1}
+                    executed={transaction.executed}
+                    isPendingApproval={
+                      pendingActions.get(transaction.id) === "approve"
+                    }
+                    isPendingExecution={
+                      pendingActions.get(transaction.id) === "execute"
+                    }
+                    onApprove={
+                      isNetworkMismatch || !address ? undefined : handleApprove
+                    }
+                    onExecute={
+                      isNetworkMismatch || !address ? undefined : handleExecute
+                    }
+                    currentAddress={address}
+                    canSign={!isNetworkMismatch && !!address}
+                  />
+                </div>
+              ))
           )}
         </div>
       </div>
 
       <div>
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-semibold text-white">Execution History</h2>
-          <button
-            disabled={historyTxs.length === 0}
-            title={
-              historyTxs.length === 0
-                ? "CSV export is unavailable — no executed transactions match the current filter"
-                : "Export executed transactions as CSV"
-            }
-            aria-label={
-              historyTxs.length === 0
-                ? "Export CSV disabled: no executed transactions match the current filter"
-                : "Export executed transactions as CSV"
-            }
-            aria-disabled={historyTxs.length === 0}
-            className="btn-secondary text-sm disabled:opacity-40 disabled:cursor-not-allowed"
-            onClick={() => {
-              if (historyTxs.length === 0) return;
-              const header = "ID,Destination,Amount (XLM),Time";
-              const rows = historyTxs.map((t) =>
-                [t.id, t.to, formatXlm(t.amount), formatAbsoluteDate(t.createdAt * 1000)].join(","),
-              );
-              const csv = [header, ...rows].join("\n");
-              const blob = new Blob([csv], { type: "text/csv" });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = "treasury-history.csv";
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
-          >
-            Export CSV
-          </button>
-        </div>
+        <h2 className="text-xl font-semibold text-white mb-4">
+          Execution History
+        </h2>
         <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -223,18 +367,36 @@ export default function TreasuryPage() {
                 <th className="text-left py-3 px-4">ID</th>
                 <th className="text-left py-3 px-4">Destination</th>
                 <th className="text-left py-3 px-4">Amount</th>
-                <th className="text-left py-3 px-4">Time</th>
+                <th className="text-left py-3 px-4">Proposed</th>
+                <th className="text-left py-3 px-4">Confirmed</th>
               </tr>
             </thead>
             <tbody>
-              {historyTxs.length === 0 ? (
+              {filteredHistoryTxs.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="text-center text-gray-500 py-8">
-                    {isLoading ? "Loading execution history..." : "No executed transactions."}
+                  <td colSpan={5} className="text-center py-8">
+                    <p className="text-gray-500 mb-4">
+                      {isLoading
+                        ? "Loading execution history..."
+                        : transactions.length === 0
+                          ? "No treasury transactions yet."
+                          : "No transactions match your current filters."}
+                    </p>
+                    {!isLoading && transactions.length > 0 && (
+                      <button
+                        onClick={() => {
+                          setSearchQuery("");
+                          setStatusFilter("executed");
+                        }}
+                        className="btn-secondary text-sm"
+                      >
+                        Reset Filters
+                      </button>
+                    )}
                   </td>
                 </tr>
               ) : (
-                historyTxs.map((transaction) => (
+                filteredHistoryTxs.map((transaction) => (
                   <tr
                     key={transaction.id}
                     className="border-b border-stellar-border/50 hover:bg-gray-800/50 cursor-pointer transition"
@@ -250,10 +412,24 @@ export default function TreasuryPage() {
                       </div>
                     </td>
                     <td className="py-3 px-4 text-gray-300 font-mono">
-                      {formatAddress(transaction.to, { startChars: 6, endChars: 4 })}
+                      {formatAddress(transaction.to, {
+                        startChars: 6,
+                        endChars: 4,
+                      })}
                     </td>
-                    <td className="py-3 px-4 text-gray-300">{formatXlm(transaction.amount)} XLM</td>
-                    <td className="py-3 px-4 text-gray-400">{formatAbsoluteDate(transaction.createdAt * 1000)}</td>
+                    <td className="py-3 px-4 text-gray-300">
+                      {formatXlm(transaction.amount)} XLM
+                    </td>
+                    <td className="py-3 px-4 text-gray-400">
+                      {formatAbsoluteDate(transaction.createdAt * 1000)}
+                    </td>
+                    <td className="py-3 px-4 text-gray-400">
+                      {transaction.executedAt != null ? (
+                        formatAbsoluteDate(transaction.executedAt * 1000)
+                      ) : (
+                        <span className="text-gray-600 italic">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))
               )}
@@ -270,7 +446,9 @@ export default function TreasuryPage() {
           />
           <div className="fixed right-0 top-0 h-full w-full max-w-md bg-background border-l border-stellar-border z-50 p-6 shadow-2xl overflow-y-auto transform transition-transform">
             <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-bold text-white">Transaction Details</h2>
+              <h2 className="text-xl font-bold text-white">
+                Transaction Details
+              </h2>
               <button
                 onClick={() => setSelectedTx(null)}
                 className="text-gray-400 hover:text-white"
@@ -294,7 +472,9 @@ export default function TreasuryPage() {
               <div>
                 <p className="text-xs text-gray-500 uppercase">Destination</p>
                 <div className="mt-1 flex items-center gap-2">
-                  <p className="text-sm text-gray-200 font-mono break-all">{selectedTx.to}</p>
+                  <p className="text-sm text-gray-200 font-mono break-all">
+                    {selectedTx.to}
+                  </p>
                   <CopyButton
                     value={selectedTx.to}
                     label={`transaction ${selectedTx.id} destination address`}
@@ -304,26 +484,35 @@ export default function TreasuryPage() {
 
               <div>
                 <p className="text-xs text-gray-500 uppercase">Amount</p>
-                <p className="text-sm text-gray-200 mt-1">{formatXlm(selectedTx.amount)} XLM</p>
+                <p className="text-sm text-gray-200 mt-1">
+                  {formatXlm(selectedTx.amount)} XLM
+                </p>
               </div>
 
               <div>
                 <p className="text-xs text-gray-500 uppercase">Memo</p>
-                <p className="text-sm text-gray-200 mt-1">{selectedTx.memo || "-"}</p>
+                <p className="text-sm text-gray-200 mt-1">
+                  {selectedTx.memo || "-"}
+                </p>
               </div>
 
               <div>
                 <p className="text-xs text-gray-500 uppercase">Approvals</p>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {selectedTx.approvals.length === 0 ? (
-                    <span className="text-xs text-gray-500">No approvals yet</span>
+                    <span className="text-xs text-gray-500">
+                      No approvals yet
+                    </span>
                   ) : (
                     selectedTx.approvals.map((approver) => (
                       <span
                         key={`${selectedTx.id}-${approver}`}
                         className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-gray-300"
                       >
-                        {formatAddress(approver, { startChars: 4, endChars: 4 })}
+                        {formatAddress(approver, {
+                          startChars: 4,
+                          endChars: 4,
+                        })}
                       </span>
                     ))
                   )}
@@ -338,22 +527,44 @@ export default function TreasuryPage() {
                   </p>
                 </div>
                 <div className="flex-1">
-                  <p className="text-xs text-gray-500 uppercase">Created</p>
+                  <p className="text-xs text-gray-500 uppercase">Proposed</p>
                   <p className="text-sm text-gray-200 mt-1">
                     {formatAbsoluteDate(selectedTx.createdAt * 1000)}
                   </p>
                 </div>
               </div>
+
+              {selectedTx.executedAt != null && (
+                <div>
+                  <p className="text-xs text-gray-500 uppercase">
+                    Confirmed on-chain
+                  </p>
+                  <p className="text-sm text-green-400 mt-1 font-medium">
+                    {formatAbsoluteDate(selectedTx.executedAt * 1000)}
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="mt-8 pt-6 border-t border-stellar-border">
-              <button className="w-full btn-secondary py-3" onClick={() => setSelectedTx(null)}>
+              <button
+                className="w-full btn-secondary py-3"
+                onClick={() => setSelectedTx(null)}
+              >
                 Close
               </button>
             </div>
           </div>
         </>
       )}
+
+      <WithdrawalModal
+        isOpen={showWithdrawalModal}
+        onClose={() => setShowWithdrawalModal(false)}
+        onPropose={handleProposeWithdrawal}
+        balance={balance}
+        isProposing={isProposing}
+      />
 
       <ConfirmationDialog
         isOpen={confirmExecuteTxId !== null}
@@ -367,6 +578,15 @@ export default function TreasuryPage() {
         }
         onConfirm={runExecute}
         onCancel={() => setConfirmExecuteTxId(null)}
+        txDetails={(() => {
+          const tx = transactions.find((t) => t.id === confirmExecuteTxId);
+          if (!tx) return undefined;
+          return {
+            txId: tx.id,
+            amount: `${formatXlm(tx.amount)} XLM`,
+            recipient: formatAddress(tx.to, { startChars: 6, endChars: 4 }),
+          };
+        })()}
       />
     </div>
   );

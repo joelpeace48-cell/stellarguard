@@ -16,10 +16,11 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { signTransaction } from "@stellar/freighter-api";
-import type { Decoder, GovernanceProposalAction } from "./contractData";
+import type { GovernanceProposalAction } from "./contractData";
+import type { Decoder } from "./sorobanClient";
 import { readPublicEnv, requirePublicEnv } from "./env";
 import { throwIfAborted } from "./requestGuard";
-import { SOROBAN_RPC_URL, NETWORK_PASSPHRASE } from "./network";
+import { NETWORK_PASSPHRASE, TX_TIMEOUT } from "./network";
 import { sorobanClient } from "./sorobanClient";
 
 // ============================================================================
@@ -35,12 +36,6 @@ export const CONTRACT_IDS = {
 
 const READONLY_SIMULATION_ACCOUNT_ENV =
   "NEXT_PUBLIC_SOROBAN_SIMULATION_ACCOUNT";
-
-// ============================================================================
-// Server Instance (kept for backward-compat; prefer sorobanClient in new code)
-// ============================================================================
-
-const server = new SorobanRpc.Server(SOROBAN_RPC_URL);
 
 const GOVERNANCE_ACTIONS: readonly GovernanceProposalAction[] = [
   "Funding",
@@ -68,7 +63,7 @@ export async function buildContractCall(
     networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(contract.call(method, ...args))
-    .setTimeout(30);
+    .setTimeout(TX_TIMEOUT);
 
   return tx;
 }
@@ -147,6 +142,15 @@ function toSymbolScVal(value: string, fieldName: string): xdr.ScVal {
   return nativeToScVal(normalized, { type: "symbol" });
 }
 
+function toStringScVal(value: string, fieldName: string): xdr.ScVal {
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error(`${fieldName} cannot be empty`);
+  }
+
+  return nativeToScVal(normalized, { type: "string" });
+}
+
 function toProposalActionScVal(action: string): xdr.ScVal {
   const normalized = action.trim() as GovernanceProposalAction;
   if (!GOVERNANCE_ACTIONS.includes(normalized)) {
@@ -172,7 +176,7 @@ async function buildTransactionXdr(
 export async function buildDepositTx(
   contractId: string,
   from: string,
-  amount: number,
+  amount: bigint | number,
 ): Promise<TransactionBuilder> {
   const args = [toAddressScVal(from), nativeToScVal(amount, { type: "i128" })];
 
@@ -183,7 +187,7 @@ export async function buildProposeWithdrawalTx(
   contractId: string,
   proposer: string,
   to: string,
-  amount: number,
+  amount: bigint | number,
   memo: string,
 ): Promise<TransactionBuilder> {
   const args = [
@@ -226,13 +230,13 @@ export async function buildCreateProposalTx(
   title: string,
   description: string,
   action: GovernanceProposalAction,
-  amount: number,
+  amount: bigint | number,
   target: string,
 ): Promise<TransactionBuilder> {
   const args = [
     toAddressScVal(proposer),
-    toSymbolScVal(title, "title"),
-    toSymbolScVal(description, "description"),
+    toStringScVal(title, "title"),
+    toStringScVal(description, "description"),
     toProposalActionScVal(action),
     nativeToScVal(amount, { type: "i128" }),
     toAddressScVal(target),
@@ -247,7 +251,7 @@ export async function buildCreateProposalXdr(
   title: string,
   description: string,
   action: GovernanceProposalAction,
-  amount: number,
+  amount: bigint | number,
   target: string,
 ): Promise<string> {
   return buildTransactionXdr(

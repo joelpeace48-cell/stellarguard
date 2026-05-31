@@ -1,4 +1,6 @@
-import { motion } from "framer-motion";
+"use client";
+
+import { motion, useReducedMotion } from "framer-motion";
 
 const variants = {
   hidden: { opacity: 0, x: -20, y: 0 },
@@ -7,13 +9,19 @@ const variants = {
 };
 
 export default function Template({ children }: { children: React.ReactNode }) {
+  const prefersReducedMotion = useReducedMotion();
+
+  if (prefersReducedMotion) {
+    return <main>{children}</main>;
+  }
+
   return (
     <motion.main
       variants={variants}
       initial="hidden"
       animate="enter"
       exit="exit"
-      transition={{ type: "linear", duration: 0.25 }}
+      transition={{ type: "tween", duration: 0.25 }}
     >
       {children}
     </motion.main>

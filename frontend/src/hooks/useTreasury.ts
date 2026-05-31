@@ -21,16 +21,24 @@ import {
 import { classifyError, type AppError } from "@/lib/errors";
 import { createLatestRequestGuard, isAbortError } from "@/lib/requestGuard";
 import { isWalletNetworkMismatch } from "@/lib/network";
+import {
+  MOCK_TREASURY_CONFIG,
+  MOCK_TREASURY_TRANSACTIONS,
+} from "@/lib/treasuryMocks";
 import { useFreighter } from "./useFreighter";
+import { usePageVisibility } from "./usePageVisibility";
+import { trackEvent } from "@/lib/analytics";
 
 const REFRESH_INTERVAL = 30_000;
 const MAX_VISIBLE_TRANSACTIONS = 20;
+const IS_TREASURY_MOCK_MODE = process.env.NEXT_PUBLIC_USE_MOCK_TREASURY === "1";
 
 type TxAction = "approve" | "execute";
 
 export function useTreasury() {
   const { address, network } = useFreighter();
-  const [balance, setBalance] = useState<bigint>(0n);
+  const isPageVisible = usePageVisibility();
+  const [balance, setBalance] = useState<bigint>(BigInt(0));
   const [config, setConfig] = useState<TreasuryConfig | null>(null);
   const [transactions, setTransactions] = useState<TreasuryTransaction[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -38,8 +46,10 @@ export function useTreasury() {
   const [txActions, setTxActions] = useState<ReadonlyMap<number, TxAction>>(
     new Map(),
   );
+  const [isProposing, setIsProposing] = useState(false);
 
   const requestGuardRef = useRef(createLatestRequestGuard());
+  const txCounterRef = useRef(MOCK_TREASURY_CONFIG.txCount);
 
   const isNetworkMismatch = useMemo(
     () => isWalletNetworkMismatch(network),
@@ -59,46 +69,23 @@ export function useTreasury() {
   }, []);
 
   const fetchBalance = useCallback(
-    async (requestId: number, signal: AbortSignal) => {
-      const result = await readContractValue(
-        CONTRACT_IDS.treasury,
-        "get_balance",
-        [],
-        {
-          decoder: decodeBigInt,
-          signal,
-          sourceAddress: address ?? undefined,
-        },
-      );
-
-      if (requestGuardRef.current.isCurrent(requestId)) {
-        setBalance(result);
-      }
-
-      return result;
+    async (signal: AbortSignal) => {
+      return readContractValue(CONTRACT_IDS.treasury, "get_balance", [], {
+        decoder: decodeBigInt,
+        signal,
+        sourceAddress: address ?? undefined,
+      });
     },
     [address],
   );
 
   const fetchConfig = useCallback(
-    async (requestId: number, signal: AbortSignal) => {
-      const result = await readContractValue(
-        CONTRACT_IDS.treasury,
-        "get_config",
-        [],
-        {
-          decoder: decodeTreasuryConfig,
-          signal,
-          sourceAddress: address ?? undefined,
-        },
-      );
-
-      if (requestGuardRef.current.isCurrent(requestId)) {
-        setConfig(result);
-        setBalance(result.balance);
-      }
-
-      return result;
+    async (signal: AbortSignal) => {
+      return readContractValue(CONTRACT_IDS.treasury, "get_config", [], {
+        decoder: decodeTreasuryConfig,
+        signal,
+        sourceAddress: address ?? undefined,
+      });
     },
     [address],
   );
@@ -148,6 +135,20 @@ export function useTreasury() {
   );
 
   const refresh = useCallback(async () => {
+    if (IS_TREASURY_MOCK_MODE) {
+      setIsLoading(false);
+      setError(null);
+      setConfig({
+        ...MOCK_TREASURY_CONFIG,
+        txCount: txCounterRef.current,
+      });
+      setBalance(MOCK_TREASURY_CONFIG.balance);
+      setTransactions((current) =>
+        current.length > 0 ? current : MOCK_TREASURY_TRANSACTIONS,
+      );
+      return;
+    }
+
     const request = requestGuardRef.current.begin();
 
     if (requestGuardRef.current.isCurrent(request.id)) {
@@ -157,13 +158,18 @@ export function useTreasury() {
 
     try {
       const [currentBalance, currentConfig] = await Promise.all([
-        fetchBalance(request.id, request.signal),
-        fetchConfig(request.id, request.signal),
+        fetchBalance(request.signal),
+        fetchConfig(request.signal),
       ]);
 
-      await fetchTransactions(request.id, request.signal, currentConfig.txCount);
+      await fetchTransactions(
+        request.id,
+        request.signal,
+        currentConfig.txCount,
+      );
 
       if (requestGuardRef.current.isCurrent(request.id)) {
+        setConfig(currentConfig);
         setBalance(currentConfig.balance ?? currentBalance);
       }
     } catch (err: unknown) {
@@ -188,7 +194,7 @@ export function useTreasury() {
   }, [address, isNetworkMismatch]);
 
   const deposit = useCallback(
-    async (amount: number): Promise<void> => {
+    async (amount: bigint | number): Promise<void> => {
       assertWalletReady();
       const walletAddress = address as string;
       setError(null);
@@ -200,6 +206,7 @@ export function useTreasury() {
           amount,
         );
         await signAndSubmit(txBuilder.build());
+        trackEvent({ name: "treasury_deposit", properties: { chain: "stellar" } });
         await refresh();
       } catch (err: unknown) {
         const appError = classifyError(err);
@@ -211,10 +218,45 @@ export function useTreasury() {
   );
 
   const proposeWithdrawal = useCallback(
-    async (to: string, amount: number, memo: string): Promise<void> => {
+    async (
+      to: string,
+      amount: bigint | number,
+      memo: string,
+    ): Promise<void> => {
+      if (IS_TREASURY_MOCK_MODE) {
+        const amountBigInt =
+          typeof amount === "bigint" ? amount : BigInt(amount);
+        const nextId = txCounterRef.current + 1;
+        txCounterRef.current = nextId;
+        setTransactions((current) => [
+          {
+            id: nextId,
+            to,
+            amount: amountBigInt,
+            memo,
+            approvals: address ? [address] : [],
+            executed: false,
+            createdAt: Math.floor(Date.now() / 1000),
+            executedAt: null,
+            proposer: address ?? "",
+          },
+          ...current,
+        ]);
+        setConfig((current) =>
+          current
+            ? {
+                ...current,
+                txCount: nextId,
+              }
+            : current,
+        );
+        return;
+      }
+
       assertWalletReady();
       const walletAddress = address as string;
       setError(null);
+      setIsProposing(true);
 
       try {
         const txBuilder = await buildProposeWithdrawalTx(
@@ -230,6 +272,8 @@ export function useTreasury() {
         const appError = classifyError(err);
         setError(appError);
         throw appError;
+      } finally {
+        setIsProposing(false);
       }
     },
     [address, assertWalletReady, refresh],
@@ -237,10 +281,55 @@ export function useTreasury() {
 
   const approve = useCallback(
     async (txId: number): Promise<void> => {
+      if (IS_TREASURY_MOCK_MODE) {
+        if (!address) {
+          throw new Error("Wallet not connected");
+        }
+        setTransactions((current) =>
+          current.map((transaction) => {
+            if (transaction.id !== txId || transaction.executed) {
+              return transaction;
+            }
+            if (transaction.approvals.includes(address)) {
+              return transaction;
+            }
+            return {
+              ...transaction,
+              approvals: [...transaction.approvals, address],
+            };
+          }),
+        );
+        return;
+      }
+
       assertWalletReady();
       const walletAddress = address as string;
       setError(null);
       setTxAction(txId, "approve");
+
+      const tx = transactions.find((transaction) => transaction.id === txId);
+      if (!tx) {
+        setTxAction(txId, null);
+        throw new Error("Transaction not found");
+      }
+      if (tx.executed) {
+        setTxAction(txId, null);
+        throw new Error("Cannot approve an executed transaction");
+      }
+      if (
+        tx.approvals.some(
+          (approver) => approver.toLowerCase() === walletAddress.toLowerCase(),
+        )
+      ) {
+        setTxAction(txId, null);
+        throw new Error("You already approved this transaction");
+      }
+      if (
+        tx.approvals.length >= (config?.threshold ?? Number.MAX_SAFE_INTEGER)
+      ) {
+        setTxAction(txId, null);
+        throw new Error("Approval threshold already met");
+      }
 
       const snapshot = transactions;
       setTransactions((current) =>
@@ -276,11 +365,32 @@ export function useTreasury() {
         setTxAction(txId, null);
       }
     },
-    [address, assertWalletReady, refresh, setTxAction, transactions],
+    [
+      address,
+      assertWalletReady,
+      config?.threshold,
+      refresh,
+      setTxAction,
+      transactions,
+    ],
   );
 
   const execute = useCallback(
     async (txId: number): Promise<void> => {
+      if (IS_TREASURY_MOCK_MODE) {
+        setTransactions((current) =>
+          current.map((transaction) =>
+            transaction.id === txId
+              ? {
+                  ...transaction,
+                  executed: true,
+                }
+              : transaction,
+          ),
+        );
+        return;
+      }
+
       assertWalletReady();
       const walletAddress = address as string;
       setError(null);
@@ -309,19 +419,34 @@ export function useTreasury() {
     setError(null);
   }, []);
 
+  // Clear stale data and cancel in-flight requests when the wallet disconnects.
+  useEffect(() => {
+    if (!address) {
+      requestGuardRef.current.cancel("Wallet disconnected.");
+      setBalance(BigInt(0));
+      setConfig(null);
+      setTransactions([]);
+      setError(null);
+      setTxActions(new Map());
+    }
+  }, [address]);
+
   useEffect(() => {
     const requestGuard = requestGuardRef.current;
     refresh();
 
     const interval = setInterval(() => {
-      refresh();
+      // Pause polling while the tab is hidden to avoid unnecessary RPC calls.
+      if (isPageVisible) {
+        refresh();
+      }
     }, REFRESH_INTERVAL);
 
     return () => {
       clearInterval(interval);
       requestGuard.cancel("Treasury refresh cancelled.");
     };
-  }, [refresh]);
+  }, [refresh, isPageVisible]);
 
   useEffect(() => {
     const requestGuard = requestGuardRef.current;
@@ -339,6 +464,7 @@ export function useTreasury() {
     error,
     isNetworkMismatch,
     pendingActions: txActions,
+    isProposing,
     deposit,
     proposeWithdrawal,
     approve,

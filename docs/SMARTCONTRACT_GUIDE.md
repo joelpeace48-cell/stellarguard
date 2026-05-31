@@ -282,6 +282,7 @@ State schema:
 - `Role(Address)`: stored `RoleAssignment` for an address.
 - `AllMembers`: address list for all assigned roles.
 - `RoleCount(u32)`: count of addresses per role level.
+- `RoleMembers(u32)`: address list for a specific role level.
 
 Core structs and enums:
 
@@ -300,6 +301,7 @@ Public API:
 - `is_member_or_above(address)`
 - `get_role(address)`
 - `get_all_members()`
+- `get_members_by_role(role)`
 - `get_summary()`
 - `transfer_ownership(current_owner, new_owner)`
 - `upgrade(owner, new_wasm_hash)`
